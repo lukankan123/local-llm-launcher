@@ -86,7 +86,7 @@ function Get-ScanRoots {
 }
 
 function Find-AllModelDirs {
-    param([int]$MaxDepth = 2)
+    param([int]$MaxDepth = 3)
 
     $hits = New-Object System.Collections.Generic.List[string]
     $roots = Get-ScanRoots
@@ -118,7 +118,13 @@ function Find-AllModelDirs {
 }
 
 function Find-LlamaServer {
-    param([int]$MaxDepth = 2)
+    <#
+      扫所有盘找 llama-server.exe，返回【所有】找到的位置。
+
+      不能"扫到第一个就停" —— 机器上可能装过好几个版本，
+      先扫到的很可能是旧的。由调用方按构建号挑最新的。
+    #>
+    param([int]$MaxDepth = 3)
 
     $roots = @()
     if ($LLAMA_DIR -match '^([A-Za-z]):') {
@@ -129,19 +135,61 @@ function Find-LlamaServer {
         if ($roots -notcontains $r) { $roots += $r }
     }
 
+    $found = New-Object System.Collections.Generic.List[string]
     foreach ($root in $roots) {
         try {
             $level1 = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
                       Where-Object { $SCRIPT:SkipDirs -notcontains $_.Name } |
                       Select-Object -First 300
             foreach ($d1 in $level1) {
-                $hit = Get-ChildItem -Path $d1.FullName -Filter 'llama-server.exe' -Recurse -Depth $MaxDepth -File -ErrorAction SilentlyContinue |
-                       Select-Object -First 1
-                if ($hit) { return $hit.DirectoryName }
+                # 不用 -Filter + Select-First 1，要全部收上来
+                $hits = Get-ChildItem -Path $d1.FullName -Filter 'llama-server.exe' -Recurse -Depth $MaxDepth -File -ErrorAction SilentlyContinue
+                foreach ($h in $hits) {
+                    if (-not $found.Contains($h.DirectoryName)) { $found.Add($h.DirectoryName) }
+                }
             }
         } catch { }
     }
-    return $null
+    return $found
+}
+
+function Select-BestLlamaDir {
+    <#
+      从多个 llama.cpp 目录里挑构建号最大的。
+      目录名里读不到构建号时，退回看 llama-server.exe 的修改时间。
+    #>
+    param([string[]]$Dirs)
+
+    if (-not $Dirs -or $Dirs.Count -eq 0) { return $null }
+    if ($Dirs.Count -eq 1) { return $Dirs[0] }
+
+    $scored = @()
+    foreach ($d in $Dirs) {
+        $num = -1
+        if ($d -match 'llama-b(\d+)') { $num = [int]$Matches[1] }
+        $mtime = $null
+        $exe = Join-Path $d 'llama-server.exe'
+        if (Test-Path $exe) { $mtime = (Get-Item $exe).LastWriteTime }
+        $scored += [pscustomobject]@{ Dir = $d; Num = $num; MTime = $mtime }
+    }
+
+    # 有构建号的优先按号排；都没有才按时间
+    $withNum = @($scored | Where-Object { $_.Num -ge 0 })
+    if ($withNum.Count -gt 0) {
+        $best = $withNum | Sort-Object Num -Descending | Select-Object -First 1
+    } else {
+        $best = $scored | Sort-Object MTime -Descending | Select-Object -First 1
+    }
+
+    if ($Dirs.Count -gt 1) {
+        Write-Host "  找到 $($Dirs.Count) 个 llama.cpp 安装：" -ForegroundColor DarkGray
+        foreach ($s in ($scored | Sort-Object Num -Descending)) {
+            $mark = if ($s.Dir -eq $best.Dir) { " ← 用这个" } else { "" }
+            $label = if ($s.Num -ge 0) { "b$($s.Num)" } else { "无构建号" }
+            Write-Host "    · $($s.Dir)  ($label)$mark" -ForegroundColor DarkGray
+        }
+    }
+    return $best.Dir
 }
 
 # =====================================================================
@@ -185,8 +233,9 @@ if ($LLAMA_EXE -and (Test-Path $LLAMA_EXE)) {
 } elseif ([string]::IsNullOrWhiteSpace($LLAMA_DIR)) {
     # 没配就自动找
     Write-Host "  LLAMA_DIR 未配置，自动搜索 llama.cpp..." -ForegroundColor DarkGray
-    $auto = Find-LlamaServer
-    if ($auto) {
+    $foundDirs = @(Find-LlamaServer)
+    if ($foundDirs.Count -gt 0) {
+        $auto = Select-BestLlamaDir -Dirs $foundDirs
         $LLAMA_DIR = $auto
         $LLAMAEXE = Join-Path $auto 'llama-server.exe'
         $ownName = Split-Path $auto -Leaf
@@ -242,7 +291,8 @@ if (-not $LLAMAEXE) {
     else { Write-Host "     config 里没配 LLAMA_DIR，自动搜索也没找到" -ForegroundColor Gray }
     Write-Host ""
     Write-Host "  正在自动搜索 llama.cpp 的实际位置（可能要十几秒）..." -ForegroundColor Cyan
-    $found = Find-LlamaServer
+    $foundDirs = @(Find-LlamaServer)
+    $found = if ($foundDirs.Count -gt 0) { Select-BestLlamaDir -Dirs $foundDirs } else { $null }
     if ($found) {
         Write-Host ""
         Write-Host "  ✔ 找到了：$found" -ForegroundColor Green
@@ -698,7 +748,12 @@ foreach ($cand in $mmprojFiles) {
     }
     if ($MMEXACT) { continue }
     if (-not $MMLOOSE) {
-        if ($MKEY -like "*$ns*" -or $ns -like "*$MKEY*") { $MMLOOSE = $cand.FullName }
+        # 用 IndexOf 做子串判断，不用 -like ——
+        # -like 会把 $ns / $MKEY 里的 * ? [ ] 当成通配符，
+        # 万一文件名含这些字符就会误匹配到别的模型的视觉文件
+        $a = $MKEY.IndexOf($ns, [StringComparison]::OrdinalIgnoreCase)
+        $b = $ns.IndexOf($MKEY, [StringComparison]::OrdinalIgnoreCase)
+        if ($a -ge 0 -or $b -ge 0) { $MMLOOSE = $cand.FullName }
     }
 }
 
@@ -951,16 +1006,27 @@ while ($true) {
         Write-Host "       看着像上次没退干净的 llama-server" -ForegroundColor Gray
         $ans = Read-Host "       关掉它再启动？[Y/N]"
         if ($ans -match '^[Yy]') {
-            try { Stop-Process -Id $busy.OwningProcess -Force -ErrorAction Stop; Write-Host "       已结束" -ForegroundColor Green }
-            catch { Write-Host "       结束失败：$($_.Exception.Message)" -ForegroundColor Red }
+            $killed = $false
+            try {
+                Stop-Process -Id $busy.OwningProcess -Force -ErrorAction Stop
+                Write-Host "       已结束" -ForegroundColor Green
+                $killed = $true
+            } catch {
+                Write-Host "       结束失败：$($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "       多半是权限不够，用管理员身份重跑这个脚本试试" -ForegroundColor Gray
+            }
             Start-Sleep -Milliseconds 800
-            continue
+            # 只有真的杀掉了才回到循环顶部重试；
+            # 杀不掉还 continue 的话，端口没变、计数没加 = 死循环
+            if ($killed) { continue }
+            Write-Host "       那换个端口" -ForegroundColor Yellow
         }
     }
     $PORT++
     $tries++
     if ($tries -gt 6) {
-        Write-Host "  X  端口 1234-1240 都被占用，先关掉占用的程序" -ForegroundColor Red
+        Write-Host "  X  一连试了 7 个端口都被占用，先关掉占用的程序" -ForegroundColor Red
+        Write-Host "     查占用：netstat -ano | findstr LISTENING" -ForegroundColor Gray
         Pause-Exit 1
     }
     Write-Host "       改用端口 $PORT —— 客户端记得一起改" -ForegroundColor Yellow

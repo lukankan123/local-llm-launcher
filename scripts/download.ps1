@@ -8,6 +8,14 @@
 #  判断依据是显卡和驱动支持的 CUDA 版本。
 # =====================================================================
 
+$ErrorActionPreference = 'Continue'
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+
+# ⚠️ 关键：PowerShell 5.1 下 Invoke-WebRequest 每收一块数据就重绘进度条，
+# 下载几百 MB 的文件会慢十倍以上（几分钟变一小时）。
+# 关掉进度显示是最有效的加速手段，比换下载方式还管用。
+$ProgressPreference = 'SilentlyContinue'
+
 function Get-GpuBackend {
     <#
       返回 @{ Backend = 'cuda'|'vulkan'|'cpu'; CudaVersion = '12.4'|...; GpuName; Note }
@@ -79,7 +87,10 @@ function Get-LlamaReleaseInfo {
     $api = 'https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10'
     $releases = $null
     try {
-        $releases = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'llama-launcher' } -TimeoutSec 40
+        # -UseBasicParsing：PS 5.1 下不加这个可能走 IE 引擎，
+        # 机器上 IE 首次运行向导没点过就会莫名失败
+        $releases = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'llama-launcher' } `
+                                      -TimeoutSec 40 -UseBasicParsing
     } catch {
         return [pscustomobject]@{ Ok = $false; Error = "访问 GitHub API 失败：$($_.Exception.Message)" }
     }
@@ -179,7 +190,7 @@ function Invoke-DownloadWithMirror {
     $sizeMB = 0
     # 先问大小，好给用户一个预期
     try {
-        $head = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec 20 -UseBasicParsing
+        $head = Invoke-WebRequest -Uri $Url -Method Head -TimeoutSec 20 -UseBasicParsing -ErrorAction Stop
         if ($head.Headers['Content-Length']) {
             $sizeMB = [math]::Round([int64]$head.Headers['Content-Length'] / 1MB)
         }
@@ -198,7 +209,17 @@ function Invoke-DownloadWithMirror {
         Write-Host "    尝试 $($m.Name)..." -NoNewline -ForegroundColor DarkGray
         try {
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            Invoke-WebRequest -Uri $tryUrl -OutFile $DestPath -TimeoutSec 600 -UseBasicParsing -ErrorAction Stop
+            # 用 .NET 的 WebClient 而不是 Invoke-WebRequest：
+            #   · IWR 在 5.1 下即使关了进度条也比 WebClient 慢
+            #   · WebClient 支持超时设置和断点信息（这里先不做续传）
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers.Add('User-Agent', 'llama-launcher')
+            $wc.Timeout = 600000
+            try {
+                $wc.DownloadFile($tryUrl, $DestPath)
+            } finally {
+                $wc.Dispose()
+            }
             $sw.Stop()
             $actualMB = [math]::Round((Get-Item $DestPath).Length / 1MB)
             if ($actualMB -lt 10) {
@@ -263,8 +284,40 @@ function Install-LlamaCpp {
         }
     }
 
-    $tmp = Join-Path $env:TEMP "llama-dl-$(Get-Random)"
-    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    # ⚠️ 不能放 $env:TEMP —— 那是 C 盘。下载 400MB + 解压 1GB 全落在
+    # C:\Users\<你>\AppData\Local\Temp，C 盘紧的机器会直接失败。
+    # 改在目标盘上建临时目录，跨盘搬运也省了。
+    $tmpParent = $TargetRoot
+    try {
+        if (-not (Test-Path $tmpParent)) { New-Item -ItemType Directory -Path $tmpParent -Force | Out-Null }
+    } catch { }
+    $tmp = Join-Path $tmpParent ".llama-dl-$(Get-Random)"
+
+    # 空间检查：两个包加起来 + 解压后约 2.5 倍
+    $needMB = 0
+    if ($info.Main) { $needMB += [math]::Round($info.Main.size / 1MB) }
+    if ($info.Cudart) { $needMB += [math]::Round($info.Cudart.size / 1MB) }
+    $needMB = [math]::Round($needMB * 2.5)
+
+    try {
+        $driveLetter = (Split-Path $tmpParent -Qualifier)
+        $drive = Get-PSDrive -Name $driveLetter.TrimEnd(':') -ErrorAction SilentlyContinue
+        if ($drive -and $drive.Free -ne $null) {
+            $freeMB = [math]::Round($drive.Free / 1MB)
+            Write-Host "    目标盘 $driveLetter 可用 $([math]::Round($drive.Free/1GB,1)) GB，本次约需 ${needMB}MB" -ForegroundColor Gray
+            if ($freeMB -lt $needMB) {
+                Write-Host "  X  磁盘空间不够（差约 $($needMB - $freeMB)MB）" -ForegroundColor Red
+                Write-Host "     清一下再试，或者把 config.ps1 里的 `$LLAMA_DIR 指到空间大的盘" -ForegroundColor Gray
+                return $null
+            }
+        }
+    } catch { }
+
+    try { New-Item -ItemType Directory -Path $tmp -Force | Out-Null }
+    catch {
+        Write-Host "  X  无法创建临时目录 $tmp：$($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
 
     try {
         # --- 下主程序 ---

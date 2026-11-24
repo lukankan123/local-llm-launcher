@@ -78,13 +78,15 @@ function Get-ScanRoots {
 }
 
 function Find-LlamaServerAuto {
-    param([int]$MaxDepth = 2)
+    param([int]$MaxDepth = 3)
     foreach ($root in (Get-ScanRoots)) {
         try {
             $level1 = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
                       Where-Object { $SCRIPT:SkipDirs -notcontains $_.Name } |
                       Select-Object -First 300
             foreach ($d1 in $level1) {
+                $direct = Join-Path $d1.FullName 'llama-server.exe'
+                if (Test-Path $direct) { return $d1.FullName }
                 $hit = Get-ChildItem -Path $d1.FullName -Filter 'llama-server.exe' -Recurse -Depth $MaxDepth -File -ErrorAction SilentlyContinue |
                        Select-Object -First 1
                 if ($hit) { return $hit.DirectoryName }
@@ -95,7 +97,7 @@ function Find-LlamaServerAuto {
 }
 
 function Find-AllGgufDirs {
-    param([int]$MaxDepth = 2)
+    param([int]$MaxDepth = 3)
     $hits = New-Object System.Collections.Generic.List[string]
     foreach ($root in (Get-ScanRoots)) {
         try {
