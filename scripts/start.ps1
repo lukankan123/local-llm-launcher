@@ -274,9 +274,55 @@ if (-not $LLAMAEXE) {
         }
     } else {
         Write-Host "  没搜到。" -ForegroundColor Yellow
-        Write-Host "  从 github.com/ggml-org/llama.cpp/releases 下 Windows 包，" -ForegroundColor Gray
-        Write-Host "  然后确认 config.ps1 里的 `$LLAMA_DIR 指向它所在的目录。" -ForegroundColor Gray
-        Pause-Exit 1
+        Write-Host ""
+        # 加载下载模块（放在这里而不是顶部，避免每次启动都做无用的函数加载）
+        $dlModule = Join-Path $PSScriptRoot 'download.ps1'
+        $canDownload = Test-Path $dlModule
+        if ($canDownload) {
+            Write-Host "  [1] 自动下载 llama.cpp（约 300-500 MB，从 GitHub）" -ForegroundColor White
+        }
+        Write-Host "  [2] 我自己下载，稍后手动指定路径" -ForegroundColor White
+        Write-Host "  [3] 退出" -ForegroundColor White
+        Write-Host ""
+        $pick = Read-Host "  选哪个"
+
+        if ($pick -eq '1' -and $canDownload) {
+            . $dlModule
+            # 装到哪：优先用 config 里 LLAMA_DIR 的盘，否则用脚本所在目录的上级
+            $targetRoot = $null
+            if ($LLAMA_DIR) { $targetRoot = $LLAMA_DIR }
+            elseif ($MODELS_DIR -and (Test-Path (Split-Path $MODELS_DIR -Parent))) {
+                $targetRoot = Split-Path $MODELS_DIR -Parent
+            } else {
+                $targetRoot = Split-Path $PSScriptRoot -Parent
+            }
+            Write-Host ""
+            Write-Host "  将安装到：$targetRoot" -ForegroundColor Gray
+            $installed = Install-LlamaCpp -TargetRoot $targetRoot
+            if ($installed) {
+                $LLAMA_DIR = $installed
+                $LLAMAEXE = Join-Path $installed 'llama-server.exe'
+                Write-Host ""
+                Write-Host "  建议把 config.ps1 里这行改成（下次就不用再搜了）：" -ForegroundColor Yellow
+                Write-Host "      `$LLAMA_DIR = `"$installed`"" -ForegroundColor White
+                Write-Host ""
+            } else {
+                Write-Host ""
+                Write-Host "  自动下载没成功。手动下载地址：" -ForegroundColor Yellow
+                Write-Host "      https://github.com/ggml-org/llama.cpp/releases" -ForegroundColor Gray
+                Write-Host "  需要两个包：llama-bXXXX-bin-win-cuda-XX.X-x64.zip" -ForegroundColor Gray
+                Write-Host "               cudart-llama-bin-win-cuda-XX.X-x64.zip" -ForegroundColor Gray
+                Pause-Exit 1
+            }
+        } else {
+            Write-Host ""
+            Write-Host "  下载地址：https://github.com/ggml-org/llama.cpp/releases" -ForegroundColor Gray
+            Write-Host "  需要两个包（都在同一个 release 的 Assets 里）：" -ForegroundColor Gray
+            Write-Host "      llama-bXXXX-bin-win-cuda-XX.X-x64.zip   主程序" -ForegroundColor Gray
+            Write-Host "      cudart-llama-bin-win-cuda-XX.X-x64.zip  运行库（漏了报找不到 cudart64_*.dll）" -ForegroundColor Gray
+            Write-Host "  解压后把 config.ps1 里的 `$LLAMA_DIR 指向 llama-server.exe 所在目录。" -ForegroundColor Gray
+            Pause-Exit 1
+        }
     }
 }
 

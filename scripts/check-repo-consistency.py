@@ -41,6 +41,7 @@ REQUIRED = [
     "scripts/0-初始化-双击我.bat", "scripts/init.ps1",
     "scripts/1-体检-双击我.bat", "scripts/doctor.ps1",
     "scripts/2-启动-双击我.bat", "scripts/start.ps1",
+    "scripts/download.ps1",
     "docs/known-issues.md",
 ]
 
@@ -50,6 +51,7 @@ CHECKSUMMED = [
     "scripts/0-初始化-双击我.bat", "scripts/init.ps1",
     "scripts/1-体检-双击我.bat", "scripts/doctor.ps1",
     "scripts/2-启动-双击我.bat", "scripts/start.ps1",
+    "scripts/download.ps1",
 ]
 
 failures = []

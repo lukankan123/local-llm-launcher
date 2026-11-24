@@ -74,6 +74,39 @@ D:\models\
 客户端地址是 `http://127.0.0.1:1234/v1`，任何 OpenAI 兼容客户端都能连
 （SillyTavern、Cherry Studio、Open WebUI、Continue……）。
 
+## 没装 llama.cpp 怎么办
+
+启动时如果找不到 llama.cpp，会问你：
+
+```
+没找到 llama.cpp。
+
+  [1] 自动下载（约 300-500 MB，从 GitHub）
+  [2] 我自己下载，稍后手动指定路径
+  [3] 退出
+```
+
+选 1 的话，脚本会：
+
+1. **检测显卡**，决定下哪个后端包
+2. **查最新构建**（不用 `latest` API —— 那返回的是里程碑版本，没有 Windows 包）
+3. **多路线下载**（GitHub 直连 → ghfast.top → gh-proxy → moeyy，逐个试）
+4. **解压校验**（确认解出了 `llama-server.exe`）
+5. 装到 `llama-bXXXXX-bin-win-<backend>-x64\` 里
+
+### 后端怎么选
+
+| 你的显卡 | 下的包 | 大小 |
+|---|---|---|
+| NVIDIA，驱动支持 CUDA 13 | `cuda-13.x` | 主程序 ~215MB + 运行库 ~407MB |
+| NVIDIA，驱动支持 CUDA 12 | `cuda-12.4` | 主程序 ~342MB + 运行库 ~373MB |
+| AMD / Intel 独显 / 核显 | `vulkan` | ~37MB，不需要额外运行库 |
+| 都不行 | `cpu` | 能跑，但慢 |
+
+CUDA 的小版本号跟着构建号变（今天 `b12110` 是 cuda-13.4，`b12674` 是 cuda-13.5），脚本从实际的 release asset 列表里挑，不硬编码。
+
+**默认不静默下载** —— 几百 MB 是有后果的动作，得让你知道。
+
 ## 目录里都是什么
 
 ```
@@ -85,6 +118,7 @@ scripts/
     init.ps1                初始化的本体
     doctor.ps1              体检的本体
     start.ps1               启动器的本体
+    download.ps1            自动下载 llama.cpp（找不到时才用）
 ```
 
 **按序号点就行**：0 → 1 → 2。

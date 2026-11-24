@@ -3,6 +3,27 @@
 本仓库采用语义化版本：主版本.次版本.修订号。
 脚本有破坏性改动（改了配置文件字段名、改了必需参数）才升主版本。
 
+## Unreleased — 自动下载
+
+### 新增
+
+- 找不到 llama.cpp 时提供自动下载选项（不静默下，问一句再动手）
+- 后端按显卡自动判断：NVIDIA 走 CUDA（按驱动版本挑 12.x/13.x），
+  其他走 Vulkan，都不行退 CPU
+- 多路线下载：GitHub 直连 → ghfast.top → gh-proxy → moeyy
+- 解压后校验 llama-server.exe 确实存在，失败不留半成品
+
+### 踩到的坑
+
+**不能用 `/releases/latest`** —— 它返回里程碑式 release（如 v1.0.0），
+只有一两个 asset，没有 Windows 构建。真正的构建发布在 releases 列表里，
+tag 形如 `b12674`。
+
+**CUDA 小版本跟构建号一起变** —— b12110 是 cuda-13.4，b12674 是 cuda-13.5。
+硬编码版本号必然打不中，要从实际 asset 列表里挑。
+
+**`??` 运算符是 PowerShell 7 才有的** —— 5.1 会语法报错，得手写 if。
+
 ## Unreleased — 元数据驱动
 
 **不再靠文件名猜模型参数，改为读 GGUF 头部元数据。**
