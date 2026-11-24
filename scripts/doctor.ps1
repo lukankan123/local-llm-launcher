@@ -154,7 +154,13 @@ Write-Head "[5/7] 端口占用"
 $port = if ($PORT) { $PORT } else { 1234 }
 $busy = $null
 try {
-    $busy = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+        $busy = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    } else {
+        # 极少数精简系统没有这个 cmdlet，退回 netstat 解析
+        $line = netstat -ano 2>$null | Select-String -Pattern ":$port\s" | Select-String -Pattern "LISTENING" | Select-Object -First 1
+        if ($line) { $busy = [pscustomobject]@{ OwningProcess = ($line -split '\s+')[-1] } }
+    }
 } catch {
     $busy = $null
 }
@@ -176,7 +182,9 @@ if (-not $busy) {
 Write-Head "[6/7] 控制台编码"
 $cp = "?"
 try {
-    if ($IsWindows -ne $false) {
+    # $IsWindows 是 PowerShell 6+ 才有的变量，5.1 里是 $null。
+    # 用 $env:OS 判断最稳，两个版本都有这个环境变量。
+    if ($env:OS -eq 'Windows_NT') {
         $cpOut = (chcp) 2>$null
         if ($cpOut -match '(\d+)') { $cp = $Matches[1] }
     } else {

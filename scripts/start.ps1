@@ -305,7 +305,14 @@ if ($SPARK) {
 $tries = 0
 while ($true) {
     $busy = $null
-    try { $busy = Get-NetTCPConnection -LocalPort $PORT -State Listen -ErrorAction SilentlyContinue } catch {}
+    try {
+        if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+            $busy = Get-NetTCPConnection -LocalPort $PORT -State Listen -ErrorAction SilentlyContinue
+        } else {
+            $line = netstat -ano 2>$null | Select-String -Pattern ":$PORT\s" | Select-String -Pattern "LISTENING" | Select-Object -First 1
+            if ($line) { $busy = [pscustomobject]@{ OwningProcess = ($line -split '\s+')[-1] } }
+        }
+    } catch {}
     if (-not $busy) { break }
     $proc = try { Get-Process -Id $busy.OwningProcess -ErrorAction SilentlyContinue } catch { $null }
     $pname = if ($proc) { $proc.ProcessName } else { "?" }
