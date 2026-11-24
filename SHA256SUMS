@@ -1,8 +1,8 @@
 # llama.cpp 启动器 —— 校验值
 # 校验：sha256sum -c SHA256SUMS   或   Get-FileHash <文件> -Algorithm SHA256
 
-ba83ba862dde7d146eb924b3d591f14eabc3930017580ca0aef7aff0ada9a2c4  scripts/config.ps1.example
+297b7c526ce59d84d9072c85ea234ea81d79f04e29c75cc8f576098cdb3dc75a  scripts/config.ps1.example
 d0a0d8189f0622b6f6102dd885cd50884d48dd2fa720c4a76c9da4b9ae867a69  scripts/doctor.bat
 3bdc50d7e4c87f6047a1e2f3d6262e395dbb446dd29a4a634f95d1a949b6fb48  scripts/doctor.ps1
 458302d1ab41d964259f0d8c289bedd71adc54a1763dad8e548e31e0708547e0  scripts/start.bat
-b46abdc48796b32e797cb6733b08cdf9647a6c8e15d1aa69d27796834493ffb0  scripts/start.ps1
+dd137acccf48e41156c14f011af426db96e9baa32dde8ac59161a85ae32c5d45  scripts/start.ps1

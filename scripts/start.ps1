@@ -154,6 +154,47 @@ Write-Host ""
 #  只读元数据段就够，不碰 tensor 数据。但 tokenizer 词表数组可能有
 #  十几万项，必须整段跳过而不是逐项解析。
 # =====================================================================
+# =====================================================================
+#  上次用过的上下文 —— 按模型记住
+#
+#  存在同目录的 last-used.json 里，不进 git。
+#  目的：同一个模型第二次启动时，默认值就是上次选的那个，回车即可。
+#  config.ps1 里的 $CTX_BY_MODEL 优先级更高，适合想固定住的场景。
+# =====================================================================
+function Get-CtxMemoryPath {
+    Join-Path $PSScriptRoot "last-used.json"
+}
+
+function Read-CtxMemory {
+    $path = Get-CtxMemoryPath
+    if (-not (Test-Path $path)) { return @{} }
+    try {
+        $raw = Get-Content $path -Raw -Encoding UTF8
+        if ([string]::IsNullOrWhiteSpace($raw)) { return @{} }
+        $obj = $raw | ConvertFrom-Json
+        $hash = @{}
+        foreach ($p in $obj.PSObject.Properties) { $hash[$p.Name] = $p.Value }
+        return $hash
+    } catch {
+        # 文件坏了不该拦住启动，静默重建
+        return @{}
+    }
+}
+
+function Save-CtxMemory {
+    param([hashtable]$Memory)
+    $path = Get-CtxMemoryPath
+    try {
+        $ordered = [ordered]@{}
+        foreach ($k in ($Memory.Keys | Sort-Object)) { $ordered[$k] = $Memory[$k] }
+        $json = $ordered | ConvertTo-Json -Depth 3
+        [System.IO.File]::WriteAllText($path, $json, [System.Text.UTF8Encoding]::new($false))
+    } catch {
+        # 写不进去也不影响本次启动，只是下次不记得
+        Write-Host "  （上下文记忆保存失败：$($_.Exception.Message)）" -ForegroundColor DarkGray
+    }
+}
+
 function Format-CtxLabel {
     param([int]$n)
     if ($n -ge 1024) {
@@ -446,6 +487,8 @@ if ($low -match 'spark' -or $low -match 'x2\.5' -or ($g.Ok -and $g.Architecture 
 # =====================================================================
 #  选上下文长度
 # =====================================================================
+$CTX_MEMORY = Read-CtxMemory
+
 if ($CTX_OVERRIDE) {
     $CTX = [int]$CTX_OVERRIDE
     Write-Host "  [配置预设] 上下文 $CTX tokens（跳过选择）" -ForegroundColor DarkGray
@@ -462,16 +505,37 @@ if ($CTX_OVERRIDE) {
         $nativeNote = "未读到原生上下文，按通用值处理"
     }
 
+    # --- 优先级 1：config.ps1 里按模型固定 ---
+    $lockedBy = $null
+    if ($CTX_BY_MODEL -and $CTX_BY_MODEL.ContainsKey($MNAME)) {
+        $defCtx = [int]$CTX_BY_MODEL[$MNAME]
+        $lockedBy = "config 固定"
+    }
+    # --- 优先级 2：上次这个模型用的值 ---
+    elseif ($null -ne $CTX_MEMORY -and $CTX_MEMORY.ContainsKey($MNAME)) {
+        $prev = [int]$CTX_MEMORY[$MNAME]
+        if ($prev -gt 0) {
+            $defCtx = $prev
+            $lockedBy = "上次用的"
+        }
+    }
+
     Write-Host ""
     Write-Host "  == 这次用多长的上下文？ ==========================" -ForegroundColor Cyan
     Write-Host "     $nativeNote" -ForegroundColor DarkGray
+    if ($lockedBy) {
+        Write-Host "     默认值来源：$lockedBy（$defCtx）" -ForegroundColor DarkGray
+    }
     Write-Host "    [1] 16K    最省显存、最快"
     Write-Host "    [2] 32K    日常聊天 / 角色扮演"
     Write-Host "    [3] 64K    长剧情 / 长文档"
     Write-Host "    [4] 128K   最长，速度明显下降"
     Write-Host "    [5] 自定义"
-    if ($defCtx -lt 65536) {
-        Write-Host "    直接回车 = $(Format-CtxLabel $defCtx)（模型上限，别再往上加了）" -ForegroundColor Yellow
+    # 只有默认值真的被原生上限卡住时才说「别再往上加」
+    if ($NATIVE_CTX -and $defCtx -ge $NATIVE_CTX -and $NATIVE_CTX -lt 131072) {
+        Write-Host "    直接回车 = $(Format-CtxLabel $defCtx)（已是模型上限 $NATIVE_CTX，别再往上加了）" -ForegroundColor Yellow
+    } elseif ($lockedBy) {
+        Write-Host "    直接回车 = $(Format-CtxLabel $defCtx)"
     } else {
         Write-Host "    直接回车 = $(Format-CtxLabel $defCtx)"
     }
@@ -489,6 +553,13 @@ if ($CTX_OVERRIDE) {
             else { Write-Host "   输入无效，用默认值" -ForegroundColor Yellow; $CTX = $defCtx }
         }
         default { $CTX = $defCtx }
+    }
+
+    # 记住这个模型这次用的值，下次直接当默认
+    if (-not $CTX_MEMORY) { $CTX_MEMORY = @{} }
+    if ($CTX_MEMORY[$MNAME] -ne $CTX) {
+        $CTX_MEMORY[$MNAME] = $CTX
+        Save-CtxMemory -Memory $CTX_MEMORY
     }
 
     # 超过模型原生上限时明确警告，但不强行改回去（有些模型能外推）

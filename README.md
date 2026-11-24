@@ -132,6 +132,41 @@ filename heuristics and says which route it took — the parameter block prints
 Architectures that need extra flags the metadata doesn't carry keep special
 handling: MiniCPM's `--min-p 0.0`, Spark's build-number self-check.
 
+## Custom context length
+
+Three ways to control it, highest priority first:
+
+**① Pin it per model in `config.ps1`**
+
+```powershell
+$CTX_BY_MODEL = @{
+    "Ornith-1.5-9B-Q4_K_M.gguf" = 32768
+    "Qwen3.5-9B-Q4_K_M.gguf"    = 65536
+}
+```
+
+Models listed here use that value and skip the menu entirely.
+
+**② Remember the last choice automatically** (default behaviour)
+
+After you pick a context for a model once, it's stored in `last-used.json`
+(gitignored). Next launch, that's the default — just press Enter. The menu says so:
+
+```
+模型原生支持 131072
+默认值来源：上次用的（32768）
+直接回车 = 32K
+```
+
+**③ Pick each time** from 16K / 32K / 64K / 128K, or `[5]` for an arbitrary number.
+Exceeding the model's native limit prints a warning — there's no training data
+behind the extra tokens.
+
+Priority: **config pin > remembered value > model's declared native value**.
+Whichever applies is printed in the menu.
+
+`$CTX_OVERRIDE` still works as a blunt global override that skips the menu entirely.
+
 ## Why not pure batch
 
 It started as a pure `.bat` script. Both attempts failed in the field:

@@ -11,3 +11,6 @@ config.bat
 .vscode/
 .idea/
 *.swp
+
+# 脚本自动记录的每个模型上次用的上下文
+last-used.json
