@@ -18,57 +18,99 @@ $ProgressPreference = 'SilentlyContinue'
 
 function Get-GpuBackend {
     <#
-      返回 @{ Backend = 'cuda'|'vulkan'|'cpu'; CudaVersion = '12.4'|...; GpuName; Note }
+      返回 @{ Backend; CudaVersion; CudaUsable; GpuName; ComputeCap; Note }
 
-      判断顺序：
-        1. nvidia-smi 能跑 → 读它的 CUDA Version → cuda 后端
-        2. 没有 NVIDIA → 试 Vulkan（AMD/Intel 独显通常支持）
-        3. 都不行 → cpu
+      ⚠️ 关键坑：nvidia-smi 报的 "CUDA Version" 是【驱动】能支持的最高版本，
+      不等于【显卡架构】能用的版本。
+
+      NVIDIA 在 CUDA 13.0 里移除了 Maxwell / Pascal / Volta 的支持
+      （Pascal = GTX 10 系，compute capability 6.1）。装了最新驱动的 1060
+      依然会报 CUDA 13.x，但下 cuda-13 的包给它跑必然失败
+      （症状：no kernel image is available for execution）。
+
+      所以判断顺序是：先看 compute capability，再看驱动 CUDA 版本。
+        CC < 7.5  -> 只能用 12.x（Maxwell 5.x / Pascal 6.x / Volta 7.0）
+        CC >= 7.5 -> 可用 13.x
     #>
     $result = [pscustomobject]@{
         Backend     = 'cpu'
         CudaVersion = $null
+        CudaUsable  = $null    # 显卡真正能用的 CUDA 大版本
         GpuName     = $null
+        ComputeCap  = $null
         Note        = $null
     }
 
     $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
-    if ($smi) {
-        try {
-            # 第一行表头里带 "CUDA Version: 13.4"
-            $header = & nvidia-smi 2>$null | Select-Object -First 4
-            $cuda = $null
-            foreach ($line in $header) {
-                if ($line -match 'CUDA Version:\s*([0-9]+\.[0-9]+)') { $cuda = $Matches[1]; break }
-            }
-            $name = & nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1
-
-            $result.Backend = 'cuda'
-            $result.GpuName = if ($name) { $name.Trim() } else { 'NVIDIA GPU' }
-            $result.CudaVersion = $cuda
-
-            if ($cuda) {
-                $major = [int]($cuda.Split('.')[0])
-                # llama.cpp 发布包按 12.4 / 13.4 这类版本切
-                # 驱动报 13.x 就用 13.4 包；12.x 用 12.4 包
-                if ($major -ge 13) {
-                    $result.Note = "CUDA $cuda → 用 cuda-13.4 版"
-                } else {
-                    $result.Note = "CUDA $cuda → 用 cuda-12.4 版"
-                }
-            } else {
-                $result.Note = "读到 NVIDIA 显卡但没读到 CUDA 版本，默认 cuda-12.4"
-            }
-            return $result
-        } catch {
-            $result.Note = "nvidia-smi 执行失败：$($_.Exception.Message)"
-        }
+    if (-not $smi) {
+        $result.Backend = 'vulkan'
+        $result.Note = "没检测到 NVIDIA 显卡，尝试 Vulkan 版（AMD/Intel 也能用）"
+        return $result
     }
 
-    # 没有 NVIDIA：Vulkan 是跨厂商的，AMD/Intel 独显多半能用
-    $result.Backend = 'vulkan'
-    $result.Note = "没检测到 NVIDIA 显卡，尝试 Vulkan 版（AMD/Intel 也能用）"
-    return $result
+    try {
+        # 显卡名
+        $name = & nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1
+        $result.GpuName = if ($name) { $name.Trim() } else { 'NVIDIA GPU' }
+
+        # 驱动支持的 CUDA 版本（从表头读）
+        $driverCuda = $null
+        $header = & nvidia-smi 2>$null | Select-Object -First 4
+        foreach ($line in $header) {
+            if ($line -match 'CUDA Version:\s*([0-9]+\.[0-9]+)') { $driverCuda = $Matches[1]; break }
+        }
+
+        # 计算能力（决定架构能不能用新 CUDA）
+        $cc = $null
+        $ccRaw = & nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>$null | Select-Object -First 1
+        if ($ccRaw -and $ccRaw.Trim() -match '^(\d+)\.(\d+)$') {
+            $cc = [double]"$($Matches[1]).$($Matches[2])"
+            $result.ComputeCap = $cc
+        }
+
+        # 老版本驱动没有 compute_cap 查询项，靠显卡型号兜底
+        if ($null -eq $cc) {
+            $legacy = @('GTX 9', 'GTX 10', 'Tesla P', 'Tesla M', 'Quadro P', 'Quadro M',
+                        'MX1', 'MX2', 'MX3', 'GT 10', 'GT 9', 'P106', 'P104', 'V100')
+            foreach ($k in $legacy) {
+                if ($result.GpuName -like "*$k*") { $cc = 6.1; $result.ComputeCap = 6.1; break }
+            }
+        }
+
+        $result.Backend = 'cuda'
+        $result.CudaVersion = $driverCuda
+
+        # 决定能用哪个大版本
+        if ($null -ne $cc -and $cc -lt 7.5) {
+            # Pascal 及更老：CUDA 13 已移除支持
+            $result.CudaUsable = 12
+            $archName = if ($cc -lt 6.0) { 'Maxwell' } elseif ($cc -lt 7.0) { 'Pascal' } else { 'Volta' }
+            $result.Note = "检测到 $archName 架构（CC $cc），CUDA 13 已不支持它 → 用 cuda-12 版"
+        } elseif ($driverCuda) {
+            $major = [int]($driverCuda.Split('.')[0])
+            if ($major -ge 13) {
+                $result.CudaUsable = 13
+                $result.Note = "驱动支持 CUDA $driverCuda，架构也够新 → 用 cuda-13 版"
+            } else {
+                $result.CudaUsable = 12
+                $result.Note = "驱动支持 CUDA $driverCuda → 用 cuda-12 版"
+            }
+        } else {
+            $result.CudaUsable = 12
+            $result.Note = "读不到 CUDA 版本，保守用 cuda-12 版"
+        }
+
+        # 老卡额外提示：Vulkan 往往更稳
+        if ($null -ne $cc -and $cc -lt 7.5) {
+            $result.Note += "`n    （老架构如果 CUDA 版报错，可以改试 Vulkan 版，跨厂商且对老卡友好）"
+        }
+        return $result
+    } catch {
+        $result.Backend = 'cuda'
+        $result.CudaUsable = 12
+        $result.Note = "检测显卡出错：$($_.Exception.Message)，保守用 cuda-12 版"
+        return $result
+    }
 }
 
 function Get-LlamaReleaseInfo {
@@ -131,12 +173,16 @@ function Get-LlamaReleaseInfo {
             }
         }
         if ($candidates.Count -gt 0) {
-            # 优先同大版本（12.x 驱动配 12.x 包），没有再退回最新
+            # 优先同大版本（12.x 架构配 12.x 包）
             $same = @($candidates | Where-Object { $_.Major -eq $CudaMajor })
             $chosen = if ($same.Count -gt 0) {
                 $same | Sort-Object Minor -Descending | Select-Object -First 1
-            } else {
+            } elseif ($CudaMajor -ge 13) {
+                # 新架构找不到 13.x 包时退 12.x 可以（向下兼容）
                 $candidates | Sort-Object Major, Minor -Descending | Select-Object -First 1
+            } else {
+                # 老架构（要 12.x）找不到 12.x 时【不能】升到 13.x，那是跑不了的
+                $null
             }
             $main = $chosen.Asset
             $verStr = "$($chosen.Major).$($chosen.Minor)"
@@ -153,6 +199,16 @@ function Get-LlamaReleaseInfo {
 
     # 目标后端没包时，退回 cpu（一定能跑，只是慢）
     $fallbackNote = $null
+    if (-not $main -and $Backend -eq 'cuda' -and $CudaMajor -lt 13) {
+        # 老架构要 12.x 但包里没有 —— 试 Vulkan，比 CPU 快得多
+        $vulkan = $assets | Where-Object { $_.name -eq "llama-$tag-bin-win-vulkan-x64.zip" } | Select-Object -First 1
+        if ($vulkan) {
+            $main = $vulkan
+            $Backend = 'vulkan'
+            $cudart = $null
+            $fallbackNote = "这个构建没有 cuda-12.x 包（老显卡只能用它），改用 Vulkan 版"
+        }
+    }
     if (-not $main) {
         $cpuPkg = $assets | Where-Object { $_.name -eq "llama-$tag-bin-win-cpu-x64.zip" } | Select-Object -First 1
         if ($cpuPkg) {
@@ -252,11 +308,10 @@ function Install-LlamaCpp {
     Write-Host ""
     Write-Host "  正在查询 llama.cpp 最新版本..." -ForegroundColor Cyan
     # 传大版本号就够，具体小版本从实际 asset 列表里挑
-    # （别用 ?? 运算符，那是 PowerShell 7 才有的，5.1 会语法报错）
+    # 注意用 CudaUsable（架构能用的大版本），不是 CudaVersion（驱动支持的）
+    # 别用 ?? 运算符，那是 PowerShell 7 才有的，5.1 会语法报错
     $cudaMajor = 12
-    if ($gpu.CudaVersion) {
-        $cudaMajor = [int]($gpu.CudaVersion.Split('.')[0])
-    }
+    if ($gpu.CudaUsable) { $cudaMajor = [int]$gpu.CudaUsable }
     $info = Get-LlamaReleaseInfo -Backend $gpu.Backend -CudaMajor $cudaMajor
     if (-not $info.Ok) {
         Write-Host "  X  $($info.Error)" -ForegroundColor Red

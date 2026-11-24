@@ -13,6 +13,27 @@
 - 多路线下载：GitHub 直连 → ghfast.top → gh-proxy → moeyy
 - 解压后校验 llama-server.exe 确实存在，失败不留半成品
 
+### 更严重的坑：老显卡会被选错包
+
+`nvidia-smi` 报的 `CUDA Version` 是**驱动**支持的最高版本，不是显卡**架构**
+能用的版本。NVIDIA 在 CUDA 13.0 里移除了 Maxwell / Pascal / Volta 支持。
+
+原来的判断只看驱动版本 → GTX 1060 装新驱动会报 CUDA 13.5 → 脚本下 cuda-13 包
+→ 启动报 `no kernel image is available for execution`，白下几百 MB。
+
+改成先读 `compute capability` 再决定：
+  CC < 7.5（Maxwell 5.x / Pascal 6.x / Volta 7.0）→ 强制 cuda-12.x
+  CC >= 7.5 → 可用 cuda-13.x
+
+老驱动没有 `compute_cap` 查询项时，按显卡型号关键字兜底
+（GTX 10 / GTX 9 / Tesla P 等）。
+
+另外：老架构要 12.x 而某次构建没出 12.x 包时，退到 Vulkan 版而不是 CPU ——
+Vulkan 对老卡友好得多。
+
+验证：8 个典型显卡的判断全部正确，包括
+  GTX 1060 CC6.1 + 驱动CUDA13.5 -> cuda-12（修之前会错选 13）
+
 ### 踩到的坑
 
 **不能用 `/releases/latest`** —— 它返回里程碑式 release（如 v1.0.0），

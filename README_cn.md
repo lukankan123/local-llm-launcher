@@ -94,12 +94,48 @@ D:\models\
 4. **解压校验**（确认解出了 `llama-server.exe`）
 5. 装到 `llama-bXXXXX-bin-win-<backend>-x64\` 里
 
+### 老显卡（GTX 10 系及更早）
+
+**能跑，但有个坑必须避开。**
+
+NVIDIA 在 **CUDA 13.0 里移除了 Maxwell / Pascal / Volta 的支持**（官方原文：
+*"Offline compilation and library support for these architectures have been
+removed in CUDA Toolkit 13.0"*）。
+
+问题在于 `nvidia-smi` 报的 `CUDA Version` 是**驱动**能支持的最高版本，
+不等于显卡架构能用的版本。装了最新驱动的 GTX 1060 依然会报 `CUDA 13.5`，
+但它的 Pascal 架构（compute capability 6.1）**跑不了 CUDA 13 的包**，
+症状是启动时报 `no kernel image is available for execution`。
+
+所以脚本改成**先看 compute capability，再看驱动版本**：
+
+| 显卡 | CC | 该用哪个包 |
+|---|---|---|
+| GTX 970 / 980（Maxwell） | 5.2 | cuda-12.x |
+| GTX 1060 / 1070 / 1080 Ti（Pascal） | 6.1 | cuda-12.x |
+| Tesla V100（Volta） | 7.0 | cuda-12.x |
+| RTX 2060+（Turing） | 7.5+ | cuda-13.x |
+| RTX 30/40/50 系 | 8.6+ | cuda-13.x |
+
+分界线是 **CC 7.5**。低于它一律用 cuda-12。
+
+老驱动的 `nvidia-smi` 没有 `compute_cap` 查询项，脚本会退回按型号关键字判断
+（`GTX 10`、`GTX 9`、`Tesla P` 等）。
+
+**另一个选择：Vulkan 版。**
+
+老架构还有个更省事的办法——脚本里手动选 Vulkan 后端。37MB，不用装 CUDA 运行库，
+跨厂商且对老卡支持更好。cuda-12 版要是报错，Vulkan 往往能跑起来。
+
+**性能预期**：GTX 1060 6GB 没有 Tensor Core，跑 7B 的 Q4 量化模型大概
+每秒几个 token。能用，但别指望快。3GB 版本只能跑更小的模型。
+
 ### 后端怎么选
 
 | 你的显卡 | 下的包 | 大小 |
 |---|---|---|
-| NVIDIA，驱动支持 CUDA 13 | `cuda-13.x` | 主程序 ~215MB + 运行库 ~407MB |
-| NVIDIA，驱动支持 CUDA 12 | `cuda-12.4` | 主程序 ~342MB + 运行库 ~373MB |
+| NVIDIA，架构 CC ≥ 7.5（Turing 及更新） | `cuda-13.x` | 主程序 ~215MB + 运行库 ~407MB |
+| NVIDIA，架构 CC < 7.5（GTX 10 系及更老） | `cuda-12.4` | 主程序 ~342MB + 运行库 ~373MB |
 | AMD / Intel 独显 / 核显 | `vulkan` | ~37MB，不需要额外运行库 |
 | 都不行 | `cpu` | 能跑，但慢 |
 
