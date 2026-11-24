@@ -49,10 +49,7 @@ try {
     Pause-Exit 1
 }
 
-if ([string]::IsNullOrWhiteSpace($MODELS_DIR) -or [string]::IsNullOrWhiteSpace($LLAMA_DIR)) {
-    Write-Host "  X  config.ps1 里 MODELS_DIR 或 LLAMA_DIR 是空的" -ForegroundColor Red
-    Pause-Exit 1
-}
+# 两个路径都允许留空 —— 留空就走自动扫描
 if ([string]::IsNullOrWhiteSpace($LISTEN_HOST)) { $LISTEN_HOST = "127.0.0.1" }
 if (-not $PORT) { $PORT = 1234 }
 if (-not $MIN_BUILD) { $MIN_BUILD = 10828 }
@@ -60,29 +57,83 @@ if (-not $MIN_BUILD) { $MIN_BUILD = 10828 }
 # =====================================================================
 #  路径自动探测
 #
-#  config.ps1 里填错路径是很容易发生的事（盘符、大小写、拼写）。
-#  与其让用户对着「目录不存在」发愣，不如主动扫一遍常见位置，
-#  把找到的候选列出来。
+#  同一个人机器上模型可能在任意盘、任意目录，不能假设 D:\models。
+#  找不到配置的路径时，扫所有固定盘找 .gguf。
+#
+#  为了不卡住启动：只扫一级子目录下的 2 层深度，跳过系统目录，
+#  并且扫一次就把结果缓存起来（models-scan.json），下次直接用。
 # =====================================================================
+
+# 系统目录和无意义的大目录，扫它们纯浪费时间
+$SCRIPT:SkipDirs = @('Windows', 'Program Files', 'Program Files (x86)',
+                     'ProgramData', 'Recovery', '$Recycle.Bin',
+                     'System Volume Information', 'PerfLogs',
+                     'node_modules', '.git', '.cache', '__pycache__',
+                     'proc', 'sys', 'dev', 'usr', 'var', 'lib', 'lib64',
+                     'boot', 'run', 'snap', 'etc', 'bin', 'sbin', 'opt')
+
+function Get-ScanRoots {
+    # 枚举所有固定盘。用 Root 属性而不是拼 "$Name:\" ——
+    # Windows 上 Root 是 "D:\"，Linux 上是 "/"，拼名字会得到 "/:\" 这种垃圾。
+    $roots = @()
+    try {
+        foreach ($d in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+            if ($null -eq $d.Free) { continue }        # 光驱/未挂载的卷没有 Free
+            if ($d.Root) { $roots += $d.Root }
+        }
+    } catch { }
+    return $roots
+}
+
+function Find-AllModelDirs {
+    param([int]$MaxDepth = 2)
+
+    $hits = New-Object System.Collections.Generic.List[string]
+    $roots = Get-ScanRoots
+    if ($roots.Count -eq 0) { return $hits }
+
+    Write-Host "  正在扫描各个磁盘找模型文件..." -ForegroundColor Cyan
+
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root)) { continue }
+        Write-Host "    扫描 $root" -ForegroundColor DarkGray
+        try {
+            $level1 = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
+                      Where-Object { $SCRIPT:SkipDirs -notcontains $_.Name } |
+                      Select-Object -First 300
+            foreach ($d1 in $level1) {
+                try {
+                    $gguf = Get-ChildItem -Path $d1.FullName -Filter '*.gguf' -Recurse -Depth $MaxDepth -File -ErrorAction SilentlyContinue |
+                            Select-Object -First 1
+                    if ($gguf) {
+                        if (-not $hits.Contains($gguf.DirectoryName)) {
+                            $hits.Add($gguf.DirectoryName)
+                        }
+                    }
+                } catch { }
+            }
+        } catch { }
+    }
+    return $hits
+}
+
 function Find-LlamaServer {
     param([int]$MaxDepth = 2)
 
     $roots = @()
-    # 优先扫 config 里写的那个盘
     if ($LLAMA_DIR -match '^([A-Za-z]):') {
         $d = "$($Matches[1]):\"
         if (Test-Path $d) { $roots += $d }
     }
-    foreach ($d in @('D:\', 'C:\', 'E:\', 'F:\')) {
-        if ((Test-Path $d) -and ($roots -notcontains $d)) { $roots += $d }
+    foreach ($r in (Get-ScanRoots)) {
+        if ($roots -notcontains $r) { $roots += $r }
     }
 
     foreach ($root in $roots) {
-        # 第一轮：只扫一级子目录（快，几百毫秒）
-        # 常见布局都是 <盘>:\<某个目录>\llama-*\llama-server.exe
         try {
             $level1 = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
-                      Select-Object -First 200
+                      Where-Object { $SCRIPT:SkipDirs -notcontains $_.Name } |
+                      Select-Object -First 300
             foreach ($d1 in $level1) {
                 $hit = Get-ChildItem -Path $d1.FullName -Filter 'llama-server.exe' -Recurse -Depth $MaxDepth -File -ErrorAction SilentlyContinue |
                        Select-Object -First 1
@@ -93,35 +144,35 @@ function Find-LlamaServer {
     return $null
 }
 
-function Find-ModelsDir {
-    param([string]$NearLlama, [int]$MaxDepth = 3)
+# =====================================================================
+#  扫描结果缓存 —— 避免每次启动都扫一遍盘
+# =====================================================================
+function Get-ScanCachePath { Join-Path $PSScriptRoot 'models-scan.json' }
 
-    # 1) llama.cpp 同级的 models 目录最常见
-    if ($NearLlama) {
-        foreach ($cand in @((Join-Path $NearLlama 'models'), (Join-Path (Split-Path $NearLlama -Parent) 'models'))) {
-            if (Test-Path $cand) {
-                $gguf = Get-ChildItem -Path $cand -Filter '*.gguf' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($gguf) { return $cand }
-            }
+function Read-ScanCache {
+    $p = Get-ScanCachePath
+    if (-not (Test-Path $p)) { return $null }
+    try {
+        $raw = Get-Content $p -Raw -Encoding UTF8
+        $obj = $raw | ConvertFrom-Json
+        # 过滤掉已经不存在的目录
+        $dirs = @($obj.dirs | Where-Object { $_ -and (Test-Path $_) })
+        if ($dirs.Count -eq 0) { return $null }
+        return $dirs
+    } catch { return $null }
+}
+
+function Save-ScanCache {
+    param([string[]]$Dirs)
+    try {
+        $obj = [ordered]@{
+            scanned_at = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+            dirs       = @($Dirs)
         }
-    }
-    # 2) 扫盘找 .gguf
-    $roots = @()
-    foreach ($d in @('D:\', 'C:\', 'E:\', 'F:\')) {
-        if (Test-Path $d) { $roots += $d }
-    }
-    foreach ($root in $roots) {
-        try {
-            $level1 = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
-                      Select-Object -First 200
-            foreach ($d1 in $level1) {
-                $hit = Get-ChildItem -Path $d1.FullName -Filter '*.gguf' -Recurse -Depth $MaxDepth -File -ErrorAction SilentlyContinue |
-                       Select-Object -First 1
-                if ($hit) { return $hit.DirectoryName }
-            }
-        } catch { }
-    }
-    return $null
+        [System.IO.File]::WriteAllText((Get-ScanCachePath),
+            ($obj | ConvertTo-Json -Depth 3),
+            [System.Text.UTF8Encoding]::new($false))
+    } catch { }
 }
 
 # =====================================================================
@@ -131,6 +182,20 @@ $LLAMAEXE = $null
 if ($LLAMA_EXE -and (Test-Path $LLAMA_EXE)) {
     $LLAMAEXE = $LLAMA_EXE
     Write-Host "  使用：$LLAMAEXE（config 指定）" -ForegroundColor DarkGray
+} elseif ([string]::IsNullOrWhiteSpace($LLAMA_DIR)) {
+    # 没配就自动找
+    Write-Host "  LLAMA_DIR 未配置，自动搜索 llama.cpp..." -ForegroundColor DarkGray
+    $auto = Find-LlamaServer
+    if ($auto) {
+        $LLAMA_DIR = $auto
+        $LLAMAEXE = Join-Path $auto 'llama-server.exe'
+        $ownName = Split-Path $auto -Leaf
+        if ($ownName -match 'llama-b(\d+)') {
+            Write-Host "  使用构建：b$($Matches[1])  ($LLAMAEXE)" -ForegroundColor DarkGray
+        } else {
+            Write-Host "  使用：$LLAMAEXE" -ForegroundColor DarkGray
+        }
+    }
 } else {
     $dirs = @(Get-ChildItem -Path $LLAMA_DIR -Directory -Filter "llama-b*" -ErrorAction SilentlyContinue)
     $parsed = @()
@@ -173,7 +238,8 @@ if ($LLAMA_EXE -and (Test-Path $LLAMA_EXE)) {
 if (-not $LLAMAEXE) {
     Write-Host ""
     Write-Host "  X  在配置的路径下找不到 llama-server.exe" -ForegroundColor Red
-    Write-Host "     配置的 LLAMA_DIR = $LLAMA_DIR" -ForegroundColor Gray
+    if ($LLAMA_DIR) { Write-Host "     配置的 LLAMA_DIR = $LLAMA_DIR" -ForegroundColor Gray }
+    else { Write-Host "     config 里没配 LLAMA_DIR，自动搜索也没找到" -ForegroundColor Gray }
     Write-Host ""
     Write-Host "  正在自动搜索 llama.cpp 的实际位置（可能要十几秒）..." -ForegroundColor Cyan
     $found = Find-LlamaServer
@@ -217,43 +283,101 @@ if (-not $LLAMAEXE) {
 # =====================================================================
 #  扫模型
 # =====================================================================
-if (-not (Test-Path $MODELS_DIR)) {
-    Write-Host ""
-    Write-Host "  X  模型目录不存在：$MODELS_DIR" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "  正在自动搜索 .gguf 模型（可能要十几秒）..." -ForegroundColor Cyan
-    $mfound = Find-ModelsDir -NearLlama $LLAMA_DIR
-    if ($mfound) {
-        Write-Host "  ✔ 找到了：$mfound" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "  把 config.ps1 里这行改成：" -ForegroundColor Yellow
-        Write-Host "      `$MODELS_DIR = `"$mfound`"" -ForegroundColor White
-        Write-Host ""
-        $ans2 = Read-Host "  现在就用这个目录吗？[Y/N]"
-        if ($ans2 -match '^[Yy]') {
-            $MODELS_DIR = $mfound
-        } else {
-            Pause-Exit 1
-        }
-    } else {
-        Write-Host "  没搜到 .gguf 文件。" -ForegroundColor Yellow
-        Pause-Exit 1
+# =====================================================================
+#  确定从哪些目录找模型
+#
+#  MODELS_DIR 可以是：
+#    · 一个路径字符串           -> 就扫这个
+#    · 空（$null / ""）         -> 自动扫描所有盘
+#    · 多个路径的数组           -> 全部扫
+#
+#  配置了路径但里面没模型时，也会退到自动扫描 —— 别人机器上的模型
+#  可能在任意盘，猜一个固定路径注定失败。
+# =====================================================================
+$searchDirs = @()
+
+function Get-GgufFromDirs {
+    param([string[]]$Dirs)
+    $out = @()
+    foreach ($d in $Dirs) {
+        if (-not (Test-Path $d)) { continue }
+        $out += @(Get-ChildItem -Path $d -Filter '*.gguf' -Recurse -File -ErrorAction SilentlyContinue)
+    }
+    return $out
+}
+
+# 1) 配置里写的目录
+$configured = @()
+if ($MODELS_DIR) { $configured = @($MODELS_DIR) | Where-Object { $_ -and (Test-Path $_) } }
+if ($configured.Count -gt 0) {
+    $searchDirs = @($configured)
+    $allGguf = Get-GgufFromDirs -Dirs $searchDirs
+    if (@($allGguf | Where-Object { $_.Name -notmatch 'mmproj' }).Count -eq 0) {
+        # 配了目录但没模型，继续往下走自动扫描
+        Write-Host "  配置的目录里没有 .gguf，改为自动扫描" -ForegroundColor Yellow
+        $searchDirs = @()
     }
 }
 
-Write-Host ""
-Write-Host "正在扫描模型文件..." -ForegroundColor DarkGray
-$allGguf = @(Get-ChildItem -Path $MODELS_DIR -Filter *.gguf -Recurse -File -ErrorAction SilentlyContinue)
+# 2) 配置无效 / 没模型：先用上次的扫描缓存
+if ($searchDirs.Count -eq 0) {
+    $cached = Read-ScanCache
+    if ($cached) {
+        $allGguf = Get-GgufFromDirs -Dirs $cached
+        if (@($allGguf | Where-Object { $_.Name -notmatch 'mmproj' }).Count -gt 0) {
+            $searchDirs = @($cached)
+            Write-Host "  使用上次的扫描结果（$($cached.Count) 个目录）" -ForegroundColor DarkGray
+        }
+    }
+}
+
+# 3) 缓存也没有：真扫一遍
+if ($searchDirs.Count -eq 0) {
+    Write-Host ""
+    $scanned = Find-AllModelDirs
+    if ($scanned.Count -gt 0) {
+        Save-ScanCache -Dirs $scanned
+        $searchDirs = @($scanned)
+        $allGguf = Get-GgufFromDirs -Dirs $scanned
+    }
+}
+
+if ($searchDirs.Count -eq 0) {
+    Write-Host ""
+    Write-Host "  X  没找到任何 .gguf 模型文件" -ForegroundColor Red
+    Write-Host "     扫过的磁盘：$((Get-ScanRoots) -join ', ')" -ForegroundColor Gray
+    Write-Host "     模型文件通常几百 MB 到几十 GB，确认已经下载到本地。" -ForegroundColor Gray
+    Write-Host "     下载地址：https://huggingface.co/models?library=gguf" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "     如果模型放在扫描不到的深层目录，可以在 config.ps1 里" -ForegroundColor Gray
+    Write-Host "     直接写明 `$MODELS_DIR = `"你的模型目录`"" -ForegroundColor Gray
+    Pause-Exit 1
+}
+
+# 去重（不同目录可能扫到同一个文件）
+$allGguf = @($allGguf | Sort-Object FullName -Unique)
 $models  = @($allGguf | Where-Object { $_.Name -notmatch 'mmproj' })
 
 if ($models.Count -eq 0) {
-    Write-Host "  X  $MODELS_DIR 里没有 .gguf 文件" -ForegroundColor Red
+    Write-Host "  X  找到的目录里没有可用的模型（只有 mmproj）" -ForegroundColor Red
     Pause-Exit 1
 }
+
+Write-Host ""
+if ($searchDirs.Count -eq 1) {
+    Write-Host "模型目录：$($searchDirs[0])" -ForegroundColor DarkGray
+} else {
+    Write-Host "模型来自 $($searchDirs.Count) 个目录：" -ForegroundColor DarkGray
+    foreach ($d in $searchDirs) { Write-Host "  · $d" -ForegroundColor DarkGray }
+}
+Write-Host ""
 
 for ($i = 0; $i -lt $models.Count; $i++) {
     $gb = [math]::Round($models[$i].Length / 1GB, 2)
     Write-Host ("  [{0}] {1}  ({2} GB)" -f ($i + 1), $models[$i].Name, $gb)
+    if ($searchDirs.Count -gt 1) {
+        Write-Host ("       $($models[$i].DirectoryName)") -ForegroundColor DarkGray
+    }
 }
 Write-Host ""
 $choiceRaw = Read-Host "请输入序号后回车"

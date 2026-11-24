@@ -1,10 +1,10 @@
 # llama.cpp 启动器 —— 校验值
 # 校验：sha256sum -c SHA256SUMS   或   Get-FileHash <文件> -Algorithm SHA256
 
-297b7c526ce59d84d9072c85ea234ea81d79f04e29c75cc8f576098cdb3dc75a  scripts/config.ps1.example
+f9359e0998af1213d2b88c8b2d783685c7759e5d85b73281d4c40c59a3d9d8d5  scripts/config.ps1.example
 a299c9fd975bb4b5acbcb765bf0730509b4b9a783e5fac6a3c99ceaa0d9494ed  scripts/0-初始化-双击我.bat
 d236718e233be54139224f854d6dd8fff35bc90ed45ba01a53c9a016264270a5  scripts/init.ps1
 d0a0d8189f0622b6f6102dd885cd50884d48dd2fa720c4a76c9da4b9ae867a69  scripts/1-体检-双击我.bat
-2e72da896507f8d5916b2f080db87b4ef791b9eac183179245ca6e101a0abb0b  scripts/doctor.ps1
+6b37e4fab667686760d95531480853bf2f54ae2054000598032d0075c9ec4aff  scripts/doctor.ps1
 458302d1ab41d964259f0d8c289bedd71adc54a1763dad8e548e31e0708547e0  scripts/2-启动-双击我.bat
-22440d9aa36bcec1ce36ee0928d14fd2da664d01dbd0633ba77d7356669c1bc5  scripts/start.ps1
+583287242656010eb5c4fb4a99fea375aa8d6a0b541a808c8226d2d623cc6760  scripts/start.ps1

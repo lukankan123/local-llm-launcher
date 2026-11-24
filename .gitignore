@@ -14,3 +14,6 @@ config.bat
 
 # 脚本自动记录的每个模型上次用的上下文
 last-used.json
+
+# 自动扫描模型的缓存
+models-scan.json

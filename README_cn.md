@@ -54,18 +54,22 @@ D:\models\
 
 **第二步**：把模型（`.gguf`）放进同一个父目录下的任意位置
 
-**第三步**：双击 `0-初始化配置-双击我.bat`，会生成 `config.ps1` 并打开记事本
+**第三步**：双击 `0-初始化-双击我.bat`，会生成 `config.ps1`
 
-**第四步**：在记事本里改两个路径，保存
+初始化时会自动扫描一遍，找到 llama.cpp 和模型目录后会问你要不要直接填好 —— 选 Y 就什么都不用改。
 
-```powershell
-$MODELS_DIR = "D:\models"     # 模型在哪
-$LLAMA_DIR  = "D:\models"     # llama.cpp 在哪
-```
+**第四步**：双击 `1-体检-双击我.bat` 确认环境没问题
 
-**第五步**：双击 `1-体检-双击我.bat` 确认环境没问题
+**第五步**：双击 `2-启动-双击我.bat`，选模型、选上下文，服务就起来了
 
-**第六步**：双击 `2-启动-双击我.bat`，选模型、选上下文，服务就起来了
+> **不用告诉它模型放哪。** 两个路径默认留空，脚本会扫所有磁盘找 `.gguf`
+> 和 `llama-server.exe`，结果缓存进 `models-scan.json`，下次直接用。
+>
+> 只有模型在自动扫描找不到的深层目录时，才需要打开 `config.ps1` 写明：
+> ```powershell
+> $MODELS_DIR = "D:\\超深\\目录"
+> $LLAMA_DIR  = "D:\\llama.cpp目录"
+> ```
 
 客户端地址是 `http://127.0.0.1:1234/v1`，任何 OpenAI 兼容客户端都能连
 （SillyTavern、Cherry Studio、Open WebUI、Continue……）。
@@ -94,8 +98,8 @@ scripts/
 
 | 字段 | 作用 | 默认 |
 |---|---|---|
-| `$MODELS_DIR` | 模型目录，递归扫描 | 必填 |
-| `$LLAMA_DIR` | llama.cpp 目录，找 `llama-bXXXXX` | 必填 |
+| `$MODELS_DIR` | 模型目录；**留空=自动扫描所有磁盘** | 空 |
+| `$LLAMA_DIR` | llama.cpp 目录；**留空=自动搜索** | 空 |
 | `$LISTEN_HOST` | 监听地址 | `127.0.0.1` |
 | `$PORT` | 端口 | `1234` |
 | `$CTX_OVERRIDE` | 强制上下文长度，留空=启动时选 | 空 |

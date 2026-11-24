@@ -40,25 +40,98 @@ if (-not (Test-Path $cfg)) {
     } catch {
         Write-Fail "config.ps1 读不出来：$($_.Exception.Message)"
     }
+    # 留空是合法的 —— 表示"自动扫描"，下面第 2、3 项会真的扫一遍
     if ([string]::IsNullOrWhiteSpace($MODELS_DIR)) {
-        Write-Fail "MODELS_DIR 是空的"
+        Write-Ok "MODELS_DIR 留空 → 自动扫描所有磁盘"
     } elseif (Test-Path $MODELS_DIR) {
         Write-Ok "模型目录存在：$MODELS_DIR"
     } else {
-        Write-Fail "模型目录不存在：$MODELS_DIR"
+        Write-Warn "模型目录不存在：$MODELS_DIR（会退回自动扫描）"
     }
     if ([string]::IsNullOrWhiteSpace($LLAMA_DIR)) {
-        Write-Fail "LLAMA_DIR 是空的"
+        Write-Ok "LLAMA_DIR 留空 → 自动搜索 llama-server.exe"
     } elseif (Test-Path $LLAMA_DIR) {
         Write-Ok "llama.cpp 目录存在：$LLAMA_DIR"
     } else {
-        Write-Fail "llama.cpp 目录不存在：$LLAMA_DIR"
+        Write-Warn "llama.cpp 目录不存在：$LLAMA_DIR（会退回自动搜索）"
     }
+}
+
+# -------------------- 扫描辅助 --------------------
+# 与 start.ps1 里同一套逻辑：config 留空或路径无效时，扫所有盘找文件。
+$SCRIPT:SkipDirs = @('Windows', 'Program Files', 'Program Files (x86)',
+                     'ProgramData', 'Recovery', '$Recycle.Bin',
+                     'System Volume Information', 'PerfLogs',
+                     'node_modules', '.git', '.cache', '__pycache__',
+                     'proc', 'sys', 'dev', 'usr', 'var', 'lib', 'lib64',
+                     'boot', 'run', 'snap', 'etc', 'bin', 'sbin', 'opt')
+
+function Get-ScanRoots {
+    $roots = @()
+    try {
+        foreach ($d in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+            if ($null -eq $d.Free) { continue }
+            if ($d.Root) { $roots += $d.Root }
+        }
+    } catch { }
+    return $roots
+}
+
+function Find-LlamaServerAuto {
+    param([int]$MaxDepth = 2)
+    foreach ($root in (Get-ScanRoots)) {
+        try {
+            $level1 = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
+                      Where-Object { $SCRIPT:SkipDirs -notcontains $_.Name } |
+                      Select-Object -First 300
+            foreach ($d1 in $level1) {
+                $hit = Get-ChildItem -Path $d1.FullName -Filter 'llama-server.exe' -Recurse -Depth $MaxDepth -File -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+                if ($hit) { return $hit.DirectoryName }
+            }
+        } catch { }
+    }
+    return $null
+}
+
+function Find-AllGgufDirs {
+    param([int]$MaxDepth = 2)
+    $hits = New-Object System.Collections.Generic.List[string]
+    foreach ($root in (Get-ScanRoots)) {
+        try {
+            $level1 = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
+                      Where-Object { $SCRIPT:SkipDirs -notcontains $_.Name } |
+                      Select-Object -First 300
+            foreach ($d1 in $level1) {
+                $g = Get-ChildItem -Path $d1.FullName -Filter '*.gguf' -Recurse -Depth $MaxDepth -File -ErrorAction SilentlyContinue |
+                     Select-Object -First 1
+                if ($g -and -not $hits.Contains($g.DirectoryName)) { $hits.Add($g.DirectoryName) }
+            }
+        } catch { }
+    }
+    return $hits
 }
 
 # -------------------- 2. 模型文件 --------------------
 Write-Head "[2/7] 模型文件"
-if ($MODELS_DIR -and (Test-Path $MODELS_DIR)) {
+$MODELS_DIR_EFFECTIVE = $MODELS_DIR
+if (-not $MODELS_DIR -or -not (Test-Path $MODELS_DIR)) {
+    Write-Info "config 里没指定模型目录（或路径无效），自动扫描"
+    $foundDirs = @(Find-AllGgufDirs)
+    if ($foundDirs.Count -gt 0) {
+        $MODELS_DIR_EFFECTIVE = $foundDirs[0]
+        Write-Ok "扫到 $($foundDirs.Count) 个含模型的目录"
+        foreach ($d in $foundDirs) { Write-Info "  $d" }
+        if ($foundDirs.Count -gt 1) {
+            Write-Info "启动时会把所有这些目录的模型都列出来"
+        }
+    } else {
+        Write-Fail "扫遍所有盘也没找到 .gguf"
+        Write-Info "确认模型已经下载到本地，或直接在 config.ps1 里写明路径"
+    }
+}
+if ($MODELS_DIR_EFFECTIVE -and (Test-Path $MODELS_DIR_EFFECTIVE)) {
+    $MODELS_DIR = $MODELS_DIR_EFFECTIVE
     $all = @(Get-ChildItem -Path $MODELS_DIR -Filter *.gguf -Recurse -File -ErrorAction SilentlyContinue)
     $mmproj = @($all | Where-Object { $_.Name -match 'mmproj' })
     $models = @($all | Where-Object { $_.Name -notmatch 'mmproj' })
@@ -79,6 +152,18 @@ if ($MODELS_DIR -and (Test-Path $MODELS_DIR)) {
 
 # -------------------- 3. llama.cpp 构建 --------------------
 Write-Head "[3/7] llama.cpp 构建"
+if (-not $LLAMA_DIR -or -not (Test-Path $LLAMA_DIR)) {
+    Write-Info "config 里没指定 llama.cpp 目录（或路径无效），自动扫描"
+    $autoDir = Find-LlamaServerAuto
+    if ($autoDir) {
+        $LLAMA_DIR = $autoDir
+        Write-Ok "找到 llama.cpp：$autoDir"
+    } else {
+        Write-Fail "没找到 llama-server.exe"
+        Write-Info "从 github.com/ggml-org/llama.cpp/releases 下载 Windows 包"
+        Write-Info "需要两个：llama-bXXXX-bin-win-cuda-XX.X-x64.zip 和 cudart-llama-...zip"
+    }
+}
 if ($LLAMA_DIR -and (Test-Path $LLAMA_DIR)) {
     $dirs = @(Get-ChildItem -Path $LLAMA_DIR -Directory -Filter "llama-b*" -ErrorAction SilentlyContinue)
     $parsed = @()
