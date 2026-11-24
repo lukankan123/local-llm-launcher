@@ -22,6 +22,15 @@ import shutil
 import subprocess
 import sys
 
+# Windows 上 Python 默认用 cp1252 输出，打印中文会抛 UnicodeEncodeError。
+# 这个脚本要能在 GitHub Actions 的 windows-latest 上跑，所以主动切 UTF-8。
+# （Linux/macOS 默认就是 UTF-8，这段是幂等的）
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 REQUIRED = [
