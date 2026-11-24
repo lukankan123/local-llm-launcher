@@ -214,6 +214,40 @@ for rel in CHECKSUMMED + ["README_cn.md", "README.md", "docs/known-issues.md"]:
 if not found_any:
     ok("未发现个人路径或密钥形态的字符串")
 
+# ---------- ⑦b 文档可达性 ----------
+# 这条是被真实遗漏逼出来的：代码修好推上去了，但面向用户的说明
+# 只留在本地 /tmp 里，仓库里没有任何地方引用它 —— 等于没写。
+# CI 只校验代码，管不到「文档写了但没人看得到」。
+print("\n⑦b 文档可达性")
+docs_dir = os.path.join(ROOT, "docs")
+readme_cn = os.path.join(ROOT, "README_cn.md")
+readme_en = os.path.join(ROOT, "README.md")
+
+if os.path.isdir(docs_dir):
+    readme_text = ""
+    for rp in (readme_cn, readme_en):
+        if os.path.exists(rp):
+            readme_text += open(rp, encoding="utf-8", errors="ignore").read()
+
+    orphan = []
+    for name in sorted(os.listdir(docs_dir)):
+        if not name.endswith(".md"):
+            continue
+        rel = f"docs/{name}"
+        # README 里出现 docs/xxx.md 或 xxx.md 都算已引用
+        if rel in readme_text or name in readme_text:
+            ok(f"{rel} 在 README 有入口")
+        else:
+            orphan.append(rel)
+
+    if orphan:
+        for o in orphan:
+            fail(f"{o} 没有被 README 引用 —— 写了但没人找得到")
+    elif not any(True for _ in []):
+        ok(f"docs/ 下 {sum(1 for n in os.listdir(docs_dir) if n.endswith('.md'))} 篇文档都有入口")
+else:
+    warn("没有 docs/ 目录")
+
 # ---------- ⑧ 危险模式 ----------
 print("\n⑧ 危险模式扫描")
 DANGEROUS = [
