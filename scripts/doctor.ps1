@@ -90,9 +90,16 @@ if ($LLAMA_DIR -and (Test-Path $LLAMA_DIR)) {
     if ($parsed.Count -eq 0) {
         $direct = Join-Path $LLAMA_DIR "llama-server.exe"
         if (Test-Path $direct) {
-            Write-Warn "目录下直接放着 llama-server.exe（没有 llama-bXXXXX 子目录）"
-            Write-Info "无法判断新旧，建议按 llama-b11514\ 的形式摆放"
-            Write-Ok "llama-server.exe 存在：$direct"
+            $ownName = Split-Path $LLAMA_DIR -Leaf
+            if ($ownName -match 'llama-b(\d+)') {
+                Write-Ok "llama.cpp 就在 $LLAMA_DIR（构建 b$($Matches[1])）"
+                Write-Info "exe 直接摆在这一层，这是发行包原样解压的结构，正常"
+            } else {
+                Write-Ok "llama-server.exe 存在：$direct"
+                Write-Info "目录名不带构建号，无法判断新旧"
+            }
+            $exeSize = [math]::Round((Get-Item $direct).Length / 1MB, 1)
+            Write-Info "文件大小：$exeSize MB"
         } else {
             Write-Fail "没找到 llama-bXXXXX 目录，也没有 llama-server.exe"
             Write-Info "从 github.com/ggml-org/llama.cpp/releases 下 Windows 包"

@@ -58,6 +58,73 @@ if (-not $PORT) { $PORT = 1234 }
 if (-not $MIN_BUILD) { $MIN_BUILD = 10828 }
 
 # =====================================================================
+#  路径自动探测
+#
+#  config.ps1 里填错路径是很容易发生的事（盘符、大小写、拼写）。
+#  与其让用户对着「目录不存在」发愣，不如主动扫一遍常见位置，
+#  把找到的候选列出来。
+# =====================================================================
+function Find-LlamaServer {
+    param([int]$MaxDepth = 2)
+
+    $roots = @()
+    # 优先扫 config 里写的那个盘
+    if ($LLAMA_DIR -match '^([A-Za-z]):') {
+        $d = "$($Matches[1]):\"
+        if (Test-Path $d) { $roots += $d }
+    }
+    foreach ($d in @('D:\', 'C:\', 'E:\', 'F:\')) {
+        if ((Test-Path $d) -and ($roots -notcontains $d)) { $roots += $d }
+    }
+
+    foreach ($root in $roots) {
+        # 第一轮：只扫一级子目录（快，几百毫秒）
+        # 常见布局都是 <盘>:\<某个目录>\llama-*\llama-server.exe
+        try {
+            $level1 = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
+                      Select-Object -First 200
+            foreach ($d1 in $level1) {
+                $hit = Get-ChildItem -Path $d1.FullName -Filter 'llama-server.exe' -Recurse -Depth $MaxDepth -File -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+                if ($hit) { return $hit.DirectoryName }
+            }
+        } catch { }
+    }
+    return $null
+}
+
+function Find-ModelsDir {
+    param([string]$NearLlama, [int]$MaxDepth = 3)
+
+    # 1) llama.cpp 同级的 models 目录最常见
+    if ($NearLlama) {
+        foreach ($cand in @((Join-Path $NearLlama 'models'), (Join-Path (Split-Path $NearLlama -Parent) 'models'))) {
+            if (Test-Path $cand) {
+                $gguf = Get-ChildItem -Path $cand -Filter '*.gguf' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($gguf) { return $cand }
+            }
+        }
+    }
+    # 2) 扫盘找 .gguf
+    $roots = @()
+    foreach ($d in @('D:\', 'C:\', 'E:\', 'F:\')) {
+        if (Test-Path $d) { $roots += $d }
+    }
+    foreach ($root in $roots) {
+        try {
+            $level1 = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
+                      Select-Object -First 200
+            foreach ($d1 in $level1) {
+                $hit = Get-ChildItem -Path $d1.FullName -Filter '*.gguf' -Recurse -Depth $MaxDepth -File -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+                if ($hit) { return $hit.DirectoryName }
+            }
+        } catch { }
+    }
+    return $null
+}
+
+# =====================================================================
 #  找 llama-server —— 自动挑构建号最大的
 # =====================================================================
 $LLAMAEXE = $null
@@ -80,20 +147,71 @@ if ($LLAMA_EXE -and (Test-Path $LLAMA_EXE)) {
         $LLAMAEXE = $latest.Exe
         Write-Host "  使用构建：b$($latest.Num)  ($LLAMAEXE)" -ForegroundColor DarkGray
     } else {
+        # 兜底：exe 直接摆在 LLAMA_DIR 里（发行包原样解压就是这样）
         $direct = Join-Path $LLAMA_DIR "llama-server.exe"
         if (Test-Path $direct) {
             $LLAMAEXE = $direct
-            Write-Host "  使用：$direct" -ForegroundColor DarkGray
-            Write-Host "        （没有 llama-bXXXXX 子目录，无法判断新旧）" -ForegroundColor Yellow
+            # 如果 LLAMA_DIR 自己的目录名就带构建号，照样能报出来
+            $ownName = Split-Path $LLAMA_DIR -Leaf
+            if ($ownName -match 'llama-b(\d+)') {
+                Write-Host "  使用构建：b$($Matches[1])  ($LLAMAEXE)" -ForegroundColor DarkGray
+            } else {
+                Write-Host "  使用：$LLAMAEXE" -ForegroundColor DarkGray
+                Write-Host "        （目录名不带构建号，无法判断新旧）" -ForegroundColor DarkGray
+            }
+        } else {
+            # 再兜一层：模型目录里会不会就放着 llama.cpp
+            $alt = Join-Path $MODELS_DIR "llama-server.exe"
+            if (Test-Path $alt) {
+                $LLAMAEXE = $alt
+                Write-Host "  使用：$alt" -ForegroundColor DarkGray
+                Write-Host "        （在模型目录里找到的）" -ForegroundColor DarkGray
+            }
         }
     }
 }
 if (-not $LLAMAEXE) {
     Write-Host ""
-    Write-Host "  X  在 $LLAMA_DIR 下找不到 llama-server.exe" -ForegroundColor Red
-    Write-Host "     从 github.com/ggml-org/llama.cpp/releases 下 Windows 包，" -ForegroundColor Gray
-    Write-Host "     解压成 $LLAMA_DIR\llama-bXXXXX\ 的形式" -ForegroundColor Gray
-    Pause-Exit 1
+    Write-Host "  X  在配置的路径下找不到 llama-server.exe" -ForegroundColor Red
+    Write-Host "     配置的 LLAMA_DIR = $LLAMA_DIR" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  正在自动搜索 llama.cpp 的实际位置（可能要十几秒）..." -ForegroundColor Cyan
+    $found = Find-LlamaServer
+    if ($found) {
+        Write-Host ""
+        Write-Host "  ✔ 找到了：$found" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "  把 config.ps1 里这行改成：" -ForegroundColor Yellow
+        Write-Host "      `$LLAMA_DIR = `"$found`"" -ForegroundColor White
+        Write-Host ""
+        $ans = Read-Host "  要现在就用这个路径继续启动吗？[Y/N]"
+        if ($ans -match '^[Yy]') {
+            $LLAMA_DIR = $found
+            $LLAMAEXE = Join-Path $found 'llama-server.exe'
+            $ownName = Split-Path $found -Leaf
+            if ($ownName -match 'llama-b(\d+)') {
+                Write-Host "  使用构建：b$($Matches[1])" -ForegroundColor DarkGray
+            }
+            # 模型目录也顺手探一下
+            if (-not (Test-Path $MODELS_DIR)) {
+                $mfound = Find-ModelsDir -NearLlama $found
+                if ($mfound) {
+                    Write-Host "  模型目录也找到了：$mfound" -ForegroundColor Green
+                    Write-Host "  对应配置行：`$MODELS_DIR = `"$mfound`"" -ForegroundColor Yellow
+                    $MODELS_DIR = $mfound
+                }
+            }
+            Write-Host ""
+        } else {
+            Write-Host "  已取消。改好 config.ps1 再启动。" -ForegroundColor Gray
+            Pause-Exit 1
+        }
+    } else {
+        Write-Host "  没搜到。" -ForegroundColor Yellow
+        Write-Host "  从 github.com/ggml-org/llama.cpp/releases 下 Windows 包，" -ForegroundColor Gray
+        Write-Host "  然后确认 config.ps1 里的 `$LLAMA_DIR 指向它所在的目录。" -ForegroundColor Gray
+        Pause-Exit 1
+    }
 }
 
 # =====================================================================
@@ -102,7 +220,25 @@ if (-not $LLAMAEXE) {
 if (-not (Test-Path $MODELS_DIR)) {
     Write-Host ""
     Write-Host "  X  模型目录不存在：$MODELS_DIR" -ForegroundColor Red
-    Pause-Exit 1
+    Write-Host ""
+    Write-Host "  正在自动搜索 .gguf 模型（可能要十几秒）..." -ForegroundColor Cyan
+    $mfound = Find-ModelsDir -NearLlama $LLAMA_DIR
+    if ($mfound) {
+        Write-Host "  ✔ 找到了：$mfound" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "  把 config.ps1 里这行改成：" -ForegroundColor Yellow
+        Write-Host "      `$MODELS_DIR = `"$mfound`"" -ForegroundColor White
+        Write-Host ""
+        $ans2 = Read-Host "  现在就用这个目录吗？[Y/N]"
+        if ($ans2 -match '^[Yy]') {
+            $MODELS_DIR = $mfound
+        } else {
+            Pause-Exit 1
+        }
+    } else {
+        Write-Host "  没搜到 .gguf 文件。" -ForegroundColor Yellow
+        Pause-Exit 1
+    }
 }
 
 Write-Host ""
