@@ -122,6 +122,8 @@ removed in CUDA Toolkit 13.0"*）。
 老驱动的 `nvidia-smi` 没有 `compute_cap` 查询项，脚本会退回按型号关键字判断
 （`GTX 10`、`GTX 9`、`Tesla P` 等）。
 
+完整说明（可以直接转给用老卡的朋友）：[docs/legacy-gpu.md](docs/legacy-gpu.md)
+
 **另一个选择：Vulkan 版。**
 
 老架构还有个更省事的办法——脚本里手动选 Vulkan 后端。37MB，不用装 CUDA 运行库，

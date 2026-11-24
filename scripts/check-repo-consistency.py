@@ -42,7 +42,7 @@ REQUIRED = [
     "scripts/1-体检-双击我.bat", "scripts/doctor.ps1",
     "scripts/2-启动-双击我.bat", "scripts/start.ps1",
     "scripts/download.ps1",
-    "docs/known-issues.md",
+    "docs/known-issues.md", "docs/legacy-gpu.md",
 ]
 
 # 需要登记进 SHA256SUMS 的文件（用户实际下载/执行的东西）
