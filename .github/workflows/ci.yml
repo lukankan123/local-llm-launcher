@@ -1,0 +1,73 @@
+name: CI
+
+# 公开仓库，别人可以随便开 PR 触发，所以不碰任何密钥。
+# 签名私钥按设计离线保管，CI 只验签名、不签。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: 编码 / 语法 / 一致性 / 签名
+    runs-on: windows-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - name: 安装 minisign
+        shell: pwsh
+        run: |
+          # 用 scoop 装比手搓下载省事，且版本可查
+          iwr -useb get.scoop.sh -OutFile $env:TEMP\scoop.ps1
+          & $env:TEMP\scoop.ps1 -RunAsAdmin
+          scoop install minisign
+          minisign -v
+
+      - name: 编码与换行符
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem scripts/*.bat | ForEach-Object {
+            $bytes = [IO.File]::ReadAllBytes($_.FullName)
+            $ascii = $true
+            try { [Text.Encoding]::GetEncoding('us-ascii').GetString($bytes) | Out-Null }
+            catch { $ascii = $false }
+            if (-not $ascii) { Write-Host "::error::$($_.Name) 壳里含非 ASCII"; $bad = 1 }
+          }
+          Get-ChildItem scripts/*.ps1, scripts/*.example | ForEach-Object {
+            $bytes = [IO.File]::ReadAllBytes($_.FullName)
+            if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+              Write-Host "::error::$($_.Name) 缺 UTF-8 BOM"; $bad = 1
+            }
+          }
+          if ($bad -eq 1) { exit 1 }
+          Write-Host "编码检查通过"
+
+      - name: PowerShell 语法
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem scripts/*.ps1, scripts/*.example | ForEach-Object {
+            $errs = $null; $tokens = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errs) | Out-Null
+            if ($errs -and $errs.Count -gt 0) {
+              $errs | Select-Object -First 5 | ForEach-Object {
+                Write-Host "::error file=$($_.Extent.File),line=$($_.Extent.StartLineNumber)::$($_.Message)"
+              }
+              $bad = 1
+            }
+          }
+          if ($bad -eq 1) { exit 1 }
+          Write-Host "语法检查通过"
+
+      - name: 一致性自查
+        shell: pwsh
+        run: python3 scripts/check-repo-consistency.py

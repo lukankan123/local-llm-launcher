@@ -1,0 +1,13 @@
+# 用户自己的配置，绝不入库（含个人路径）
+config.ps1
+config.bat
+
+# 测试用的假环境
+/mock/
+*.tmp
+*.log
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
