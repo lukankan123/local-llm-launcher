@@ -100,20 +100,37 @@ Everything is in `config.ps1`, documented inline. The ones you'll touch:
 Setting `$LISTEN_HOST` to `0.0.0.0` exposes the server to the network.
 `llama-server` has no authentication unless you set `--api-key`.
 
-## Supported model families
+## Supported models
 
-The launcher inspects the filename and applies per-family defaults:
+**No filename guessing — it reads the model's own metadata.**
 
-| Keyword | Context | Special handling |
-|---|---|---|
-| `spark` / `x2.5` | 128K (64K for Q8 weights) | `--jinja`, reasoning on, build-number self-check |
-| `minicpm5` | 128K | `--min-p 0.0 --jinja`, temp 1.0 |
-| `qwen3.5` | 16K | — |
-| `ornith` | 16K | `--jinja` (tool calling deadlocks without it), repeat penalty 1.1 |
-| `e4b` | 16K | — |
-| anything else | 8K | default sampling |
+GGUF headers carry plain-text metadata. The launcher reads what it actually needs:
 
-Models outside this table still work with defaults, and the context menu is always manual.
+| Reads | Decides |
+|---|---|
+| `general.architecture` | architecture (`qwen3next` / `llama` / `qwen3` …) |
+| `{arch}.context_length` | the model's real native context length |
+| `tokenizer.chat_template` | is there a chat template → pass `--jinja` or not |
+| `{arch}.vision.*` / `clip.has_vision_encoder` | does this model accept images |
+
+So **there is no model-name list to maintain** — new models just work:
+
+- **Context default = what the model declares** (capped at 128K).
+  A model with an 8K native context will not be handed 64K; picking above
+  the native limit prints an explicit warning.
+- **`--jinja` only when a chat template exists** — that's the real determinant
+  of whether tool calling works, far better than guessing from the filename.
+- **Architecture containing `next` / `mamba` / `jamba` / `hybrid`** → hybrid
+  attention, prone to repetition loops, repeat penalty raised to 1.1.
+- **Vision-capable but no mmproj found** → warns that images won't work.
+  The reverse (mmproj matched but model declares no vision) also warns.
+
+If metadata can't be read (corrupt file, non-standard export), it falls back to
+filename heuristics and says which route it took — the parameter block prints
+`依据 : 元数据（qwen3next）` or `依据 : 文件名`.
+
+Architectures that need extra flags the metadata doesn't carry keep special
+handling: MiniCPM's `--min-p 0.0`, Spark's build-number self-check.
 
 ## Why not pure batch
 

@@ -140,6 +140,187 @@ Write-Host ""
 #  归一化的量化档列表必须长的在前：PowerShell 的 -replace 不区分大小写，
 #  'F16' 排 'BF16' 前面会把 bf16 削成 'b'，视觉文件就永远匹配不上。
 # =====================================================================
+# =====================================================================
+#  读 GGUF 元数据
+#
+#  模型文件头部有明文元数据，能直接读出架构名、原生上下文、有没有 chat
+#  template。比按文件名猜可靠得多 —— 文件名是用户随便起的，元数据是
+#  导出时写进去的。
+#
+#  GGUF 格式（v2/v3）：
+#      magic "GGUF" | version u32 | tensor_count u64 | kv_count u64
+#      然后 kv_count 组：key_len u64 | key | value_type u32 | value
+#
+#  只读元数据段就够，不碰 tensor 数据。但 tokenizer 词表数组可能有
+#  十几万项，必须整段跳过而不是逐项解析。
+# =====================================================================
+function Format-CtxLabel {
+    param([int]$n)
+    if ($n -ge 1024) {
+        $k = $n / 1024
+        if ($k -eq [Math]::Floor($k)) { return "$([int]$k)K" }
+        return "$([Math]::Round($k,1))K"
+    }
+    return "$n"
+}
+
+function Get-GgufInfo {
+    param([string]$Path)
+
+    $result = [pscustomobject]@{
+        Ok             = $false
+        Error          = $null
+        Architecture   = $null
+        Name           = $null
+        ContextLength  = $null
+        BlockCount     = $null
+        HasChatTemplate = $false
+        HasVision      = $false
+    }
+
+    $fs = $null
+    $br = $null
+    try {
+        $fs = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+        $br = New-Object System.IO.BinaryReader($fs)
+
+        $magic = [System.Text.Encoding]::ASCII.GetString($br.ReadBytes(4))
+        if ($magic -ne 'GGUF') {
+            $result.Error = "不是 GGUF 文件（magic=$magic）"
+            return $result
+        }
+
+        $version = $br.ReadUInt32()
+        if ($version -lt 2 -or $version -gt 3) {
+            $result.Error = "GGUF 版本 $version 暂不支持（支持 v2/v3）"
+            return $result
+        }
+        $null = $br.ReadUInt64()          # tensor_count，用不到
+        $kvCount = $br.ReadUInt64()
+
+        # 防御：损坏文件可能报出天文数字
+        if ($kvCount -gt 100000) {
+            $result.Error = "元数据条数异常（$kvCount），文件可能损坏"
+            return $result
+        }
+
+        $meta = @{}
+
+        # 辅助：读字符串
+        $readStr = {
+            $len = $br.ReadUInt64()
+            if ($len -gt 100MB) { throw "字符串长度异常：$len" }
+            $bytes = $br.ReadBytes([int]$len)
+            [System.Text.Encoding]::UTF8.GetString($bytes)
+        }
+        # 辅助：跳过某个类型的一个值
+        $skip = $null
+        $skip = {
+            param([uint32]$vt)
+            switch ($vt) {
+                0 { $null = $br.ReadByte() }              # uint8
+                1 { $null = $br.ReadSByte() }             # int8
+                2 { $null = $br.ReadUInt16() }            # uint16
+                3 { $null = $br.ReadInt16() }             # int16
+                4 { $null = $br.ReadUInt32() }            # uint32
+                5 { $null = $br.ReadInt32() }             # int32
+                6 { $null = $br.ReadSingle() }            # float32
+                7 { $null = $br.ReadByte() }              # bool
+                8 { $null = & $readStr }                  # string
+                10 { $null = $br.ReadUInt64() }           # uint64
+                11 { $null = $br.ReadInt64() }            # int64
+                12 { $null = $br.ReadDouble() }           # float64
+                9 {                                       # array
+                    $et = $br.ReadUInt32()
+                    $cnt = $br.ReadUInt64()
+                    for ($i = 0; $i -lt $cnt; $i++) { & $skip $et }
+                }
+                default { throw "未知的值类型 $vt" }
+            }
+        }
+
+        for ($i = 0; $i -lt $kvCount; $i++) {
+            $key = & $readStr
+            $vtype = $br.ReadUInt32()
+
+            # 词表数组整段跳过 —— 这是唯一可能很大的字段
+            if ($vtype -eq 9 -and $key -like 'tokenizer.ggml.*') {
+                $et = $br.ReadUInt32()
+                $cnt = $br.ReadUInt64()
+                if ($et -eq 8) {
+                    # 字符串数组：逐条读长度并跳过
+                    for ($j = 0; $j -lt $cnt; $j++) {
+                        $len = $br.ReadUInt64()
+                        $null = $fs.Seek([long]$len, 'Current')
+                    }
+                } else {
+                    for ($j = 0; $j -lt $cnt; $j++) { & $skip $et }
+                }
+                $meta[$key] = "<array of $cnt>"
+                continue
+            }
+
+            switch ($vtype) {
+                8 { $meta[$key] = & $readStr }
+                4 { $meta[$key] = $br.ReadUInt32() }
+                10 { $meta[$key] = $br.ReadUInt64() }
+                5 { $meta[$key] = $br.ReadInt32() }
+                7 { $meta[$key] = ($br.ReadByte() -ne 0) }
+                9 {
+                    $et = $br.ReadUInt32()
+                    $cnt = $br.ReadUInt64()
+                    for ($j = 0; $j -lt $cnt; $j++) { & $skip $et }
+                    $meta[$key] = "<array of $cnt>"
+                }
+                default {
+                    & $skip $vtype
+                }
+            }
+        }
+
+        $arch = $meta['general.architecture']
+        $result.Ok = $true
+        $result.Architecture = $arch
+        $result.Name = $meta['general.name']
+
+        if ($arch) {
+            # 上下文长度因架构而异，键名带架构前缀
+            $ctxKey = "$arch.context_length"
+            if ($meta.ContainsKey($ctxKey)) {
+                $v = $meta[$ctxKey]
+                if ($v -is [uint32] -or $v -is [uint64] -or $v -is [int32]) {
+                    # 有些模型导出的训练长度小得离谱（比如 512），低于 4K 就别当真
+                    if ([int64]$v -ge 4096) { $result.ContextLength = [int64]$v }
+                }
+            }
+            $bcKey = "$arch.block_count"
+            if ($meta.ContainsKey($bcKey)) { $result.BlockCount = [int64]$meta[$bcKey] }
+
+            # 视觉能力：不同架构的键名不统一，都试一遍
+            foreach ($k in @("$arch.vision.block_count", 'clip.has_vision_encoder',
+                             'clip.has_vision_tower', "$arch.vision.patch_size")) {
+                if ($meta.ContainsKey($k)) { $result.HasVision = $true; break }
+            }
+        }
+
+        # 有没有 chat template —— 这才是要不要 --jinja 的真实依据
+        if ($meta.ContainsKey('tokenizer.chat_template')) {
+            $tplVal = $meta['tokenizer.chat_template']
+            if ($tplVal -is [string] -and -not $tplVal.StartsWith('<array')) {
+                $result.HasChatTemplate = ($tplVal.Length -gt 10)
+            }
+        }
+
+        return $result
+    } catch {
+        $result.Error = $_.Exception.Message
+        return $result
+    } finally {
+        if ($br) { $br.Dispose() }
+        if ($fs) { $fs.Dispose() }
+    }
+}
+
 function Get-NormName {
     param([string]$Name)
     $s = $Name
@@ -180,8 +361,13 @@ if ($MMEXACT) { $MMPROJ = $MMEXACT; $MMHOW = "基名完全一致" }
 elseif ($MMLOOSE) { $MMPROJ = $MMLOOSE; $MMHOW = "基名互相包含，建议确认一下" }
 
 # =====================================================================
-#  按架构给默认参数
-#  这些值是从实际跑崩/跑呆的案例里调出来的，改之前先看 docs/known-issues.md
+#  参数决策
+#
+#  优先用模型文件自己声明的元数据（架构名、原生上下文、有无 chat template），
+#  拿不到时才退回按文件名猜。文件名是用户随便起的，元数据是导出时写进去的，
+#  后者可靠得多。
+#
+#  这些阈值是从实际跑崩/跑呆的案例里调出来的，改之前先看 docs/known-issues.md
 # =====================================================================
 $CTX = 8192
 $TEMPC = 0.9
@@ -190,28 +376,70 @@ $REPPEN = 1.05
 $EXTRA = @()
 $SPARK = $false
 $RFLAGS = @()
+$DECIDE = "文件名"
+$NATIVE_CTX = $null      # 模型自己声明的最大上下文，用来约束菜单
 
 $low = $MNAME.ToLower()
+$g = Get-GgufInfo $MODEL
 
-if ($low -match 'minicpm5') {
-    $CTX = 131072
-    $TEMPC = 1.0
-    $EXTRA = @('--min-p','0.0','--jinja')
+if ($g.Ok -and $g.Architecture) {
+    $arch = $g.Architecture.ToLower()
+    $DECIDE = "元数据（$arch）"
+
+    # --- 原生上下文：模型自己声明的最大长度 ---
+    if ($g.ContextLength) {
+        $CTX = [int]$g.ContextLength
+        $NATIVE_CTX = [int]$g.ContextLength
+    }
+
+    # --- 有 chat template 才需要 --jinja ---
+    # 缺 --jinja 时工具调用会退化成「反复调同一个工具」的循环
+    if ($g.HasChatTemplate) { $EXTRA = @('--jinja') }
+
+    # --- 混合架构（attention + SSM）容易退化复读，惩罚提高一档 ---
+    if ($arch -match 'next|mamba|jamba|hybrid|falcon-h1') { $REPPEN = 1.1 }
+
+    # --- 视觉模型但没配到 vision projector，明确提示 ---
+    if ($g.HasVision -and -not $MMPROJ) {
+        Write-Host "  [注意] 这个模型声明了视觉能力，但没找到对应的 mmproj 文件" -ForegroundColor Yellow
+        Write-Host "         图片将无法输入。确认一下模型目录里有没有配套的 mmproj-*.gguf" -ForegroundColor Gray
+        Write-Host ""
+    }
+    # --- 声明了视觉能力但文件不在，或者反过来 ---
+    if (-not $g.HasVision -and $MMPROJ) {
+        Write-Host "  [注意] 配到了 mmproj 但模型本身没声明视觉能力，可能配错了" -ForegroundColor Yellow
+    }
+
+    # 特定架构仍需要个别参数（元数据里没有这些信息）
+    if ($arch -match 'minicpm') {
+        $TEMPC = 1.0
+        $EXTRA = @('--min-p','0.0') + $EXTRA     # 防复读
+    }
+} else {
+    # --- 读不到元数据：退回文件名规则 ---
+    if ($g.Error) {
+        Write-Host "  [提示] 读不到模型元数据（$($g.Error)），改按文件名判断" -ForegroundColor Yellow
+    }
+
+    if ($low -match 'minicpm5') {
+        $CTX = 131072
+        $TEMPC = 1.0
+        $EXTRA = @('--min-p','0.0','--jinja')
+    }
+    if ($low -match 'e4b')      { $CTX = 16384 }
+    if ($low -match 'qwen3\.5') { $CTX = 16384 }
+    if ($low -match 'ornith') {
+        $CTX = 16384
+        $EXTRA = @('--jinja')
+        $REPPEN = 1.1
+    }
 }
-if ($low -match 'spark' -or $low -match 'x2\.5') { $SPARK = $true }
-if ($low -match 'e4b')     { $CTX = 16384 }
-if ($low -match 'qwen3\.5'){ $CTX = 16384 }
-if ($low -match 'ornith') {
-    $CTX = 16384
-    # 混合架构（attention + SSM）的工具调用必须走 chat template，
-    # 缺 --jinja 会和客户端死锁成「反复调同一个工具」的循环
+
+# --- Spark 无论元数据读没读到都要做版本自检（它需要特定构建）---
+if ($low -match 'spark' -or $low -match 'x2\.5' -or ($g.Ok -and $g.Architecture -match 'spark')) {
+    $SPARK = $true
     $EXTRA = @('--jinja')
-    # 这类架构容易退化复读，惩罚提高一档
-    $REPPEN = 1.1
-}
-if ($SPARK) {
-    $CTX = 131072
-    $EXTRA = @('--jinja')
+    if (-not $g.Ok) { $CTX = 131072 }
     if ($low -match 'q8_0') { $CTX = 65536 }   # Q8 权重显存吃紧，降一档
 }
 
@@ -222,14 +450,31 @@ if ($CTX_OVERRIDE) {
     $CTX = [int]$CTX_OVERRIDE
     Write-Host "  [配置预设] 上下文 $CTX tokens（跳过选择）" -ForegroundColor DarkGray
 } else {
+    # 默认值和上限都跟着模型的原生上下文走 ——
+    # 模型只支持 8K 却硬塞 64K，要么起不来，要么输出退化
+    if ($NATIVE_CTX) {
+        $cap = [Math]::Min([int]$NATIVE_CTX, 131072)      # 实用上限 128K
+        $defCtx = $cap
+        $nativeNote = "模型原生支持 $NATIVE_CTX"
+    } else {
+        $cap = 131072
+        $defCtx = 65536
+        $nativeNote = "未读到原生上下文，按通用值处理"
+    }
+
     Write-Host ""
     Write-Host "  == 这次用多长的上下文？ ==========================" -ForegroundColor Cyan
+    Write-Host "     $nativeNote" -ForegroundColor DarkGray
     Write-Host "    [1] 16K    最省显存、最快"
     Write-Host "    [2] 32K    日常聊天 / 角色扮演"
     Write-Host "    [3] 64K    长剧情 / 长文档"
     Write-Host "    [4] 128K   最长，速度明显下降"
     Write-Host "    [5] 自定义"
-    Write-Host "    直接回车 = 64K（模型建议值 $CTX）"
+    if ($defCtx -lt 65536) {
+        Write-Host "    直接回车 = $(Format-CtxLabel $defCtx)（模型上限，别再往上加了）" -ForegroundColor Yellow
+    } else {
+        Write-Host "    直接回车 = $(Format-CtxLabel $defCtx)"
+    }
     Write-Host "  ==================================================" -ForegroundColor Cyan
     $sel = Read-Host "   输入 1-5 回车"
     switch ($sel) {
@@ -241,9 +486,16 @@ if ($CTX_OVERRIDE) {
             $cust = Read-Host "   自定义 token 数（例 49152）"
             $n = 0
             if ([int]::TryParse($cust, [ref]$n) -and $n -gt 0) { $CTX = $n }
-            else { Write-Host "   输入无效，用默认 64K" -ForegroundColor Yellow; $CTX = 65536 }
+            else { Write-Host "   输入无效，用默认值" -ForegroundColor Yellow; $CTX = $defCtx }
         }
-        default { $CTX = 65536 }
+        default { $CTX = $defCtx }
+    }
+
+    # 超过模型原生上限时明确警告，但不强行改回去（有些模型能外推）
+    if ($NATIVE_CTX -and $CTX -gt $NATIVE_CTX) {
+        Write-Host "  [警告] 你选的 $CTX 超过模型原生上限 $NATIVE_CTX" -ForegroundColor Yellow
+        Write-Host "         超出部分没有训练数据支撑，输出质量会明显下降" -ForegroundColor Gray
+        Write-Host "         真要用就确认一下模型是否支持外推（YaRN 之类）" -ForegroundColor Gray
     }
 }
 
@@ -343,13 +595,18 @@ while ($true) {
 Write-Host ""
 Write-Dash
 Write-Host "Model  : $MNAME"
+Write-Host "依据   : $DECIDE" -ForegroundColor DarkGray
 if ($MMPROJ) {
     Write-Host "Vision : $(Split-Path $MMPROJ -Leaf)"
     Write-Host "         （依据：$MMHOW）" -ForegroundColor DarkGray
 } else {
     Write-Host "Vision : 无（纯文本）"
 }
-Write-Host "Ctx    : $CTX  (KV $KVTYPE)"
+if ($NATIVE_CTX) {
+    Write-Host "Ctx    : $CTX  (KV $KVTYPE，模型上限 $NATIVE_CTX)"
+} else {
+    Write-Host "Ctx    : $CTX  (KV $KVTYPE)"
+}
 Write-Host "采样   : temp $TEMPC , top-p $TOPP $($EXTRA -join ' ')"
 if ($RFLAGS.Count -gt 0) { Write-Host "推理   : $($RFLAGS -join ' ')" }
 Write-Host "端口   : $PORT   （客户端地址 http://$LISTEN_HOST`:$PORT/v1）"
