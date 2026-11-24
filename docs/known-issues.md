@@ -73,7 +73,7 @@ Ornith 分支已经这么设了。如果还复读，可以再提到 1.15，但�
 
 ## 配置加载报 Cannot overwrite variable Host
 
-**症状**：跑 `doctor.bat` 报 `Cannot overwrite variable Host because it is read-only or constant`。
+**症状**：跑 `1-体检-双击我.bat` 报 `Cannot overwrite variable Host because it is read-only or constant`。
 
 **原因**：配置里变量名叫 `$HOST`，而 PowerShell 的 `$Host` 是内置只读变量，
 **变量名不区分大小写**，等于要覆盖系统变量。

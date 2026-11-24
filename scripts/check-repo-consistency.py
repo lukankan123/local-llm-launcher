@@ -37,16 +37,19 @@ REQUIRED = [
     "README.md", "README_cn.md", "CHANGELOG.md", "RELEASING.md", "LICENSE",
     "SKILL.md", "SKILL.en.md",
     "SHA256SUMS",
-    "scripts/config.ps1.example", "scripts/doctor.bat", "scripts/doctor.ps1",
-    "scripts/start.bat", "scripts/start.ps1",
+    "scripts/config.ps1.example",
+    "scripts/0-初始化-双击我.bat", "scripts/init.ps1",
+    "scripts/1-体检-双击我.bat", "scripts/doctor.ps1",
+    "scripts/2-启动-双击我.bat", "scripts/start.ps1",
     "docs/known-issues.md",
 ]
 
 # 需要登记进 SHA256SUMS 的文件（用户实际下载/执行的东西）
 CHECKSUMMED = [
     "scripts/config.ps1.example",
-    "scripts/doctor.bat", "scripts/doctor.ps1",
-    "scripts/start.bat", "scripts/start.ps1",
+    "scripts/0-初始化-双击我.bat", "scripts/init.ps1",
+    "scripts/1-体检-双击我.bat", "scripts/doctor.ps1",
+    "scripts/2-启动-双击我.bat", "scripts/start.ps1",
 ]
 
 failures = []

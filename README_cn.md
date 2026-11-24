@@ -73,14 +73,17 @@ $LLAMA_DIR  = "D:\models"     # llama.cpp 在哪
 ## 目录里都是什么
 
 ```
-0-初始化配置-双击我.bat   生成 config.ps1（只需跑一次）
-1-体检-双击我.bat         环境体检，只读不改
-2-启动-双击我.bat         启动服务
-config.ps1.example        配置模板
-init.ps1                  初始化的本体
-doctor.ps1                体检的本体
-start.ps1                 启动器的本体
+scripts/
+    0-初始化-双击我.bat      ← 第一次先点这个
+    1-体检-双击我.bat        环境体检，只读不改
+    2-启动-双击我.bat        启动服务
+    config.ps1.example      配置模板
+    init.ps1                初始化的本体
+    doctor.ps1              体检的本体
+    start.ps1               启动器的本体
 ```
+
+**按序号点就行**：0 → 1 → 2。
 
 `.bat` 只有三行，纯英文，只负责叫起对应的 `.ps1`。
 中文全在 `.ps1` 里 —— 这是被迫的，见下面「为什么不用纯 bat 实现」。
